@@ -4,7 +4,7 @@ Matrix Deploy
 Один сервер. Одна команда. Всё готово.
 
 Запуск
-bash <(curl -fsSL https://raw.githubusercontent.com/konvas-oss/matrix-deploy/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/konvasru-oss/matrix-deploy/main/install.sh)
 Скрипт спросит домен, имя администратора и пароль. Больше ничего.
 
 Что установится
