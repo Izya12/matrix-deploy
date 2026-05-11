@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  Matrix Synapse — автоустановка v3.0
+#  Matrix Synapse — автоустановка v3.1
 #  Debian 12+  •  запуск от root
 #  github.com/ТВОЙ_НИК/matrix-deploy
 # ============================================================
@@ -29,6 +29,7 @@ SECRETS_FILE="/root/.matrix_secrets"
 PG_PASS_FILE="/root/.matrix_pg_pass"
 BACKUP_DIR="/opt/matrix-backups"
 BACKUP_KEEP=7
+LIVEKIT_DOMAIN=""  # заполняется при вводе
 
 # ── Баннер ───────────────────────────────────────────────
 show_banner() {
@@ -36,7 +37,7 @@ show_banner() {
   echo ""
   echo -e "${CYAN}${BOLD}"
   echo "  ╔══════════════════════════════════════════════════╗"
-  echo "  ║     Matrix Synapse  •  Deploy v3.0              ║"
+  echo "  ║     Matrix Synapse  •  Deploy v3.1              ║"
   echo "  ║     Debian 12+  •  One command install          ║"
   echo "  ╚══════════════════════════════════════════════════╝"
   echo -e "${NC}"
@@ -76,7 +77,7 @@ ensure_deps() {
     curl wget lsb-release apt-transport-https gnupg \
     nginx certbot python3-certbot-nginx python3 ufw \
     postgresql postgresql-contrib fail2ban jq coturn \
-    qrencode
+    qrencode dnsutils
 }
 
 # Загрузить секреты если есть
@@ -123,15 +124,23 @@ show_qr_link() {
 check_dns() {
   local domain="$1"
   section "Проверка DNS"
+
   local server_ip
-  server_ip=$(curl -s --max-time 5 https://api.ipify.org || \
-              curl -s --max-time 5 https://ifconfig.me || \
+  server_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+              curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
               hostname -I | awk '{print $1}')
+
   local domain_ip
-  domain_ip=$(getent hosts "$domain" | awk '{print $1}' | head -1 || true)
+  domain_ip=$(dig +short "$domain" A 2>/dev/null | tail -1 || \
+              host "$domain" 2>/dev/null | grep 'has address' | awk '{print $4}' | head -1 || \
+              getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -1 || true)
 
   if [[ -z "$domain_ip" ]]; then
-    err "Домен $domain не резолвится. Проверь DNS записи у регистратора."
+    warn "Не удалось проверить DNS для $domain (dig/host недоступны)"
+    warn "Убедись что домен указывает на IP: $server_ip"
+    read -rp "Продолжить? (y/n): " FORCE
+    [[ "$FORCE" != "y" && "$FORCE" != "Y" ]] && err "Отмена"
+    return
   fi
 
   if [[ "$server_ip" != "$domain_ip" ]]; then
@@ -141,7 +150,7 @@ check_dns() {
     read -rp "Продолжить всё равно? (y/n): " FORCE
     [[ "$FORCE" != "y" && "$FORCE" != "Y" ]] && err "Отмена"
   else
-    log "DNS OK — домен указывает на этот сервер ($server_ip)"
+    log "DNS OK — $domain → $server_ip"
   fi
 }
 
@@ -903,6 +912,11 @@ do_healthcheck() {
   check_endpoint "Synapse Admin"              "https://$domain/admin/"
   check_endpoint "Well-known client"          "https://$domain/.well-known/matrix/client"
 
+  if [[ -n "$LIVEKIT_DOMAIN" ]]; then
+    check_endpoint "LiveKit server"           "https://$LIVEKIT_DOMAIN"
+    check_endpoint "LiveKit JWT service"      "https://$LIVEKIT_DOMAIN/_matrix/client/unstable/com.element.msc4143/openid/request_token"
+  fi
+
   echo ""
   if [[ $fail -eq 0 ]]; then
     log "Всё работает ($ok/$(( ok+fail )))"
@@ -926,9 +940,211 @@ SCRIPT
 }
 
 # ══════════════════════════════════════════════════════════
-#  CERTBOT RENEWAL CRON
+#  LIVEKIT (звонки для Element X)
 # ══════════════════════════════════════════════════════════
-setup_certbot_renewal() {
+setup_livekit() {
+  local lk_domain="$1"
+  local matrix_domain="$2"
+  section "LiveKit (звонки Element X)"
+
+  # Генерируем ключи если нет
+  if grep -q 'LIVEKIT_KEY' "$SECRETS_FILE" 2>/dev/null; then
+    source "$SECRETS_FILE"
+    log "LiveKit ключи загружены"
+  else
+    LIVEKIT_KEY="matrix"
+    LIVEKIT_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48)
+    cat >> "$SECRETS_FILE" <<EOF
+LIVEKIT_KEY='$LIVEKIT_KEY'
+LIVEKIT_SECRET='$LIVEKIT_SECRET'
+EOF
+    log "LiveKit ключи сгенерированы"
+  fi
+
+  # Скачиваем LiveKit server
+  log "Скачиваю LiveKit server..."
+  local LK_VERSION
+  LK_VERSION=$(curl -s https://api.github.com/repos/livekit/livekit/releases/latest | jq -r .tag_name)
+  local LK_URL="https://github.com/livekit/livekit/releases/download/${LK_VERSION}/livekit_linux_amd64.tar.gz"
+
+  wget -q "$LK_URL" -O /tmp/livekit.tar.gz || err "Не удалось скачать LiveKit"
+  tar -xzf /tmp/livekit.tar.gz -C /tmp/
+  mv /tmp/livekit-server /usr/local/bin/livekit-server 2>/dev/null || \
+    mv /tmp/livekit /usr/local/bin/livekit-server
+  chmod +x /usr/local/bin/livekit-server
+  rm -f /tmp/livekit.tar.gz
+  log "LiveKit server установлен"
+
+  # Скачиваем livekit-jwt-service (нужен для авторизации Matrix)
+  log "Скачиваю livekit-jwt-service..."
+  local JWT_VERSION
+  JWT_VERSION=$(curl -s https://api.github.com/repos/element-hq/livekit-jwt-service/releases/latest | jq -r .tag_name)
+  local JWT_URL="https://github.com/element-hq/livekit-jwt-service/releases/download/${JWT_VERSION}/livekit-jwt-service-linux-amd64"
+
+  wget -q "$JWT_URL" -O /usr/local/bin/livekit-jwt-service || \
+    err "Не удалось скачать livekit-jwt-service"
+  chmod +x /usr/local/bin/livekit-jwt-service
+  log "livekit-jwt-service установлен"
+
+  # Конфиг LiveKit
+  mkdir -p /etc/livekit
+  cat > /etc/livekit/livekit.yaml <<EOF
+port: 7880
+rtc:
+  port_range_start: 50000
+  port_range_end: 60000
+  tcp_port: 7881
+  use_external_ip: true
+keys:
+  $LIVEKIT_KEY: $LIVEKIT_SECRET
+logging:
+  level: info
+EOF
+
+  # Конфиг livekit-jwt-service
+  cat > /etc/livekit/jwt.yaml <<EOF
+livekit_url: wss://$lk_domain
+livekit_key: $LIVEKIT_KEY
+livekit_secret: $LIVEKIT_SECRET
+listen_addr: 127.0.0.1:8889
+EOF
+
+  # Systemd для LiveKit server
+  cat > /etc/systemd/system/livekit.service <<EOF
+[Unit]
+Description=LiveKit Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/livekit-server --config /etc/livekit/livekit.yaml
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Systemd для livekit-jwt-service
+  cat > /etc/systemd/system/livekit-jwt.service <<EOF
+[Unit]
+Description=LiveKit JWT Service for Matrix
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/livekit-jwt-service --config /etc/livekit/jwt.yaml
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable livekit livekit-jwt
+  systemctl restart livekit livekit-jwt
+
+  log "LiveKit запущен"
+
+  # SSL для livekit домена
+  log "SSL сертификат для $lk_domain..."
+  certbot certonly --nginx \
+    -d "$lk_domain" \
+    --non-interactive \
+    --agree-tos \
+    --email "$LE_EMAIL" || err "Не удалось получить сертификат для $lk_domain"
+
+  # Nginx для LiveKit
+  cat >> /etc/nginx/sites-available/matrix <<NGINX
+
+# ── LiveKit ──────────────────────────────────────────────
+server {
+    listen 80;
+    server_name $lk_domain;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $lk_domain;
+
+    ssl_certificate /etc/letsencrypt/live/$lk_domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$lk_domain/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    # LiveKit WebSocket и HTTP API
+    location / {
+        proxy_pass http://127.0.0.1:7880;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # JWT service для Matrix
+    location /_matrix/client/unstable/com.element.msc4143/openid/request_token {
+        proxy_pass http://127.0.0.1:8889;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX
+
+  nginx -t && systemctl reload nginx
+
+  # Добавляем конфиг звонков в Synapse
+  cat > /etc/matrix-synapse/conf.d/livekit.yaml <<EOF
+# LiveKit звонки для Element X
+experimental_features:
+  msc3266_enabled: true
+  msc4143_enabled: true
+
+livekit:
+  url: wss://$lk_domain
+  jwt_service_url: https://$lk_domain/_matrix/client/unstable/com.element.msc4143/openid/request_token
+EOF
+
+  # Добавляем порты в UFW
+  ufw allow 7881/tcp   # LiveKit TCP RTC
+  ufw allow 50000:60000/udp  # LiveKit UDP RTC
+
+  systemctl restart matrix-synapse
+  log "LiveKit интегрирован с Synapse"
+
+  # Обновляем Element конфиг для поддержки звонков
+  if [[ -f /var/www/html/element/config.json ]]; then
+    local tmp
+    tmp=$(mktemp)
+    jq --arg lk "wss://$lk_domain" \
+       --arg jwt "https://$lk_domain/_matrix/client/unstable/com.element.msc4143/openid/request_token" \
+       '. + {
+         "features": {
+           "feature_video_rooms": true,
+           "feature_element_call": true
+         },
+         "element_call": {
+           "url": "https://call.element.io",
+           "use_exclusively": false,
+           "participant_limit": 8,
+           "brand": "Element Call"
+         }
+       }' /var/www/html/element/config.json > "$tmp"
+    mv "$tmp" /var/www/html/element/config.json
+    chown www-data:www-data /var/www/html/element/config.json
+    log "Element Web обновлён для поддержки звонков"
+  fi
+}
+
+
   if ! systemctl is-active --quiet certbot.timer 2>/dev/null; then
     echo "0 3 * * * root certbot renew --quiet --nginx" > /etc/cron.d/certbot-renew
   fi
@@ -1015,6 +1231,12 @@ show_final() {
   printf  "  ║  Element:   https://%s/element/\n" "$domain"
   printf  "  ║  Админка:   https://%s/admin/\n" "$domain"
   printf  "  ║  Админ:     @%s:%s\n" "$admin_user" "$domain"
+  if [[ -n "$LIVEKIT_DOMAIN" ]]; then
+  printf  "  ║  LiveKit:   wss://%s\n" "$LIVEKIT_DOMAIN"
+  echo    "  ║  Звонки:    Element X ✓  •  Element Classic ✓           ║"
+  else
+  echo    "  ║  Звонки:    Element Classic ✓ (LiveKit не установлен)   ║"
+  fi
   echo "  ╠══════════════════════════════════════════════════════════════╣"
   echo "  ║  Команды:                                                    ║"
   echo "  ║  matrix-reset-password   — сменить пароль пользователя      ║"
@@ -1104,8 +1326,17 @@ read -rp "  Email для Let's Encrypt: " LE_EMAIL
 [[ -z "$LE_EMAIL" ]] && err "Email обязателен"
 
 echo ""
-info "Домен:  $DOMAIN"
-info "Админ:  @$ADMIN_USER:$DOMAIN"
+info "Звонки через Element X требуют отдельного поддомена."
+info "Например: если Matrix на matrix.example.com,"
+info "то LiveKit можно поставить на livekit.example.com"
+info "Оба должны заранее указывать на IP этого сервера."
+echo ""
+read -rp "  Домен LiveKit (или Enter чтобы пропустить): " LIVEKIT_DOMAIN
+
+echo ""
+info "Домен Matrix:  $DOMAIN"
+[[ -n "$LIVEKIT_DOMAIN" ]] && info "Домен LiveKit: $LIVEKIT_DOMAIN"
+info "Админ:         @$ADMIN_USER:$DOMAIN"
 echo ""
 read -rp "  Всё верно? (y/n): " CONFIRM
 [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && err "Отмена"
@@ -1117,9 +1348,14 @@ if [[ "$MODE" == "repair" ]]; then
   /usr/local/bin/matrix-backup 2>/dev/null || warn "Не удалось сделать бэкап — продолжаю"
 fi
 
+# Минимальные зависимости для проверок до основной установки
+apt-get update -qq
+apt-get install -y -qq curl dnsutils 2>/dev/null || true
+
 # Основная установка
 check_ports
 check_dns "$DOMAIN"
+[[ -n "$LIVEKIT_DOMAIN" ]] && check_dns "$LIVEKIT_DOMAIN"
 ensure_deps
 setup_postgres
 setup_synapse "$DOMAIN"
@@ -1133,6 +1369,7 @@ setup_helper_commands "$DOMAIN"
 setup_backup_cron
 setup_media_cleanup
 setup_certbot_renewal
+[[ -n "$LIVEKIT_DOMAIN" ]] && setup_livekit "$LIVEKIT_DOMAIN" "$DOMAIN"
 start_synapse_and_init "$DOMAIN" "$ADMIN_USER" "$ADMIN_PASS"
 setup_ufw
 do_healthcheck "$DOMAIN"
