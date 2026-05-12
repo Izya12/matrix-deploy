@@ -675,26 +675,41 @@ fi
 #  SYNAPSE ADMIN
 # ══════════════════════════════════════════════════════════
 section "Synapse Admin"
-ADMIN_TAG=$(curl -s https://api.github.com/repos/etkecc/synapse-admin/releases/latest \
+# Пробуем два источника
+SADMIN_URL=""
+ADMIN_TAG=$(curl -s https://api.github.com/repos/element-hq/synapse-admin/releases/latest \
   | jq -r .tag_name 2>/dev/null || true)
 if [ -n "$ADMIN_TAG" ] && [ "$ADMIN_TAG" != "null" ]; then
-  wget -q "https://github.com/etkecc/synapse-admin/releases/download/${ADMIN_TAG}/synapse-admin.tar.gz" \
-    -O /tmp/synapse-admin.tar.gz 2>/dev/null
+  SADMIN_URL="https://github.com/element-hq/synapse-admin/releases/download/${ADMIN_TAG}/synapse-admin.tar.gz"
+else
+  ADMIN_TAG=$(curl -s https://api.github.com/repos/etkecc/synapse-admin/releases/latest \
+    | jq -r .tag_name 2>/dev/null || true)
+  if [ -n "$ADMIN_TAG" ] && [ "$ADMIN_TAG" != "null" ]; then
+    SADMIN_URL="https://github.com/etkecc/synapse-admin/releases/download/${ADMIN_TAG}/synapse-admin.tar.gz"
+  fi
+fi
+
+if [ -n "$SADMIN_URL" ]; then
+  wget -q "$SADMIN_URL" -O /tmp/synapse-admin.tar.gz 2>/dev/null
   if [ $? -eq 0 ]; then
-    tar -xzf /tmp/synapse-admin.tar.gz -C /tmp/ 2>/dev/null || true
+    mkdir -p /tmp/sadmin-extract
+    tar -xzf /tmp/synapse-admin.tar.gz -C /tmp/sadmin-extract/ 2>/dev/null || true
     rm -rf /var/www/html/admin
-    SADMIN_DIR=$(find /tmp -maxdepth 1 \( -name 'synapse-admin' -o -name 'synapse-admin-*' \) -type d 2>/dev/null | head -1)
+    # Ищем папку с index.html — где бы она ни оказалась
+    SADMIN_DIR=$(find /tmp/sadmin-extract -name 'index.html' -maxdepth 3 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
     if [ -n "$SADMIN_DIR" ]; then
       mv "$SADMIN_DIR" /var/www/html/admin
       chown -R www-data:www-data /var/www/html/admin
       log "Synapse Admin установлен"
+    else
+      warn "Не удалось найти index.html в архиве Synapse Admin"
     fi
-    rm -f /tmp/synapse-admin.tar.gz
+    rm -rf /tmp/sadmin-extract /tmp/synapse-admin.tar.gz
   else
-    warn "Не удалось скачать Synapse Admin — пропускаю"
+    warn "Не удалось скачать Synapse Admin"
   fi
 else
-  warn "Не удалось получить версию Synapse Admin — пропускаю"
+  warn "Не удалось найти релиз Synapse Admin — пропускаю"
 fi
 
 # ══════════════════════════════════════════════════════════
@@ -722,15 +737,23 @@ if [ -n "$LIVEKIT_DOMAIN" ]; then
     wget -q "https://github.com/livekit/livekit/releases/download/${LK_TAG}/livekit_linux_amd64.tar.gz" \
       -O /tmp/livekit.tar.gz
     if [ $? -eq 0 ]; then
-      tar -xzf /tmp/livekit.tar.gz -C /tmp/ 2>/dev/null
-      if [ -f /tmp/livekit-server ]; then
-        mv /tmp/livekit-server /usr/local/bin/livekit-server
-      elif [ -f /tmp/livekit ]; then
-        mv /tmp/livekit /usr/local/bin/livekit-server
+      mkdir -p /tmp/livekit-extract
+      tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/ 2>/dev/null
+      # Ищем бинарник — может называться по-разному
+      LK_BIN=$(find /tmp/livekit-extract -type f -executable \
+        \( -name 'livekit-server' -o -name 'livekit' \) 2>/dev/null | head -1)
+      if [ -z "$LK_BIN" ]; then
+        # Берём любой исполняемый файл из архива
+        LK_BIN=$(find /tmp/livekit-extract -type f -executable 2>/dev/null | head -1)
       fi
-      chmod +x /usr/local/bin/livekit-server 2>/dev/null || true
-      rm -f /tmp/livekit.tar.gz
-      log "LiveKit server скачан"
+      if [ -n "$LK_BIN" ]; then
+        mv "$LK_BIN" /usr/local/bin/livekit-server
+        chmod +x /usr/local/bin/livekit-server
+        log "LiveKit server установлен"
+      else
+        warn "Не удалось найти бинарник LiveKit в архиве"
+      fi
+      rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
     else
       warn "Не удалось скачать LiveKit server"
     fi
