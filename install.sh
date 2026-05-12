@@ -675,41 +675,40 @@ fi
 #  SYNAPSE ADMIN
 # ══════════════════════════════════════════════════════════
 section "Synapse Admin"
-# Пробуем два источника
-SADMIN_URL=""
-ADMIN_TAG=$(curl -s https://api.github.com/repos/element-hq/synapse-admin/releases/latest \
+ADMIN_TAG=$(curl -s --max-time 10 https://api.github.com/repos/element-hq/synapse-admin/releases/latest \
   | jq -r .tag_name 2>/dev/null || true)
-if [ -n "$ADMIN_TAG" ] && [ "$ADMIN_TAG" != "null" ]; then
-  SADMIN_URL="https://github.com/element-hq/synapse-admin/releases/download/${ADMIN_TAG}/synapse-admin.tar.gz"
-else
-  ADMIN_TAG=$(curl -s https://api.github.com/repos/etkecc/synapse-admin/releases/latest \
+if [ -z "$ADMIN_TAG" ] || [ "$ADMIN_TAG" = "null" ]; then
+  ADMIN_TAG=$(curl -s --max-time 10 https://api.github.com/repos/etkecc/synapse-admin/releases/latest \
     | jq -r .tag_name 2>/dev/null || true)
-  if [ -n "$ADMIN_TAG" ] && [ "$ADMIN_TAG" != "null" ]; then
-    SADMIN_URL="https://github.com/etkecc/synapse-admin/releases/download/${ADMIN_TAG}/synapse-admin.tar.gz"
-  fi
+  SADMIN_REPO="etkecc"
+else
+  SADMIN_REPO="element-hq"
+fi
+# Фолбэк на известную рабочую версию
+if [ -z "$ADMIN_TAG" ] || [ "$ADMIN_TAG" = "null" ]; then
+  ADMIN_TAG="v0.10.3"
+  SADMIN_REPO="etkecc"
+  warn "GitHub API недоступен — использую версию $ADMIN_TAG"
 fi
 
-if [ -n "$SADMIN_URL" ]; then
-  wget -q "$SADMIN_URL" -O /tmp/synapse-admin.tar.gz 2>/dev/null
-  if [ $? -eq 0 ]; then
-    mkdir -p /tmp/sadmin-extract
-    tar -xzf /tmp/synapse-admin.tar.gz -C /tmp/sadmin-extract/ 2>/dev/null || true
-    rm -rf /var/www/html/admin
-    # Ищем папку с index.html — где бы она ни оказалась
-    SADMIN_DIR=$(find /tmp/sadmin-extract -name 'index.html' -maxdepth 3 2>/dev/null | head -1 | xargs dirname 2>/dev/null || true)
-    if [ -n "$SADMIN_DIR" ]; then
-      mv "$SADMIN_DIR" /var/www/html/admin
-      chown -R www-data:www-data /var/www/html/admin
-      log "Synapse Admin установлен"
-    else
-      warn "Не удалось найти index.html в архиве Synapse Admin"
-    fi
-    rm -rf /tmp/sadmin-extract /tmp/synapse-admin.tar.gz
+SADMIN_URL="https://github.com/${SADMIN_REPO}/synapse-admin/releases/download/${ADMIN_TAG}/synapse-admin.tar.gz"
+wget -q --timeout=60 "$SADMIN_URL" -O /tmp/synapse-admin.tar.gz 2>/dev/null
+if [ $? -eq 0 ]; then
+  mkdir -p /tmp/sadmin-extract
+  tar -xzf /tmp/synapse-admin.tar.gz -C /tmp/sadmin-extract/ 2>/dev/null || true
+  rm -rf /var/www/html/admin
+  SADMIN_DIR=$(find /tmp/sadmin-extract -name 'index.html' -maxdepth 3 2>/dev/null \
+    | head -1 | xargs dirname 2>/dev/null || true)
+  if [ -n "$SADMIN_DIR" ]; then
+    mv "$SADMIN_DIR" /var/www/html/admin
+    chown -R www-data:www-data /var/www/html/admin
+    log "Synapse Admin установлен ($ADMIN_TAG)"
   else
-    warn "Не удалось скачать Synapse Admin"
+    warn "Не удалось найти index.html в архиве Synapse Admin"
   fi
+  rm -rf /tmp/sadmin-extract /tmp/synapse-admin.tar.gz
 else
-  warn "Не удалось найти релиз Synapse Admin — пропускаю"
+  warn "Не удалось скачать Synapse Admin — пропускаю"
 fi
 
 # ══════════════════════════════════════════════════════════
@@ -731,42 +730,48 @@ if [ -n "$LIVEKIT_DOMAIN" ]; then
   fi
 
   # LiveKit server
-  LK_TAG=$(curl -s https://api.github.com/repos/livekit/livekit/releases/latest \
+  LK_TAG=$(curl -s --max-time 10 https://api.github.com/repos/livekit/livekit/releases/latest \
     | jq -r .tag_name 2>/dev/null || true)
-  if [ -n "$LK_TAG" ] && [ "$LK_TAG" != "null" ]; then
-    wget -q "https://github.com/livekit/livekit/releases/download/${LK_TAG}/livekit_linux_amd64.tar.gz" \
-      -O /tmp/livekit.tar.gz
-    if [ $? -eq 0 ]; then
-      mkdir -p /tmp/livekit-extract
-      tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/ 2>/dev/null
-      # Ищем бинарник — может называться по-разному
-      LK_BIN=$(find /tmp/livekit-extract -type f -executable \
-        \( -name 'livekit-server' -o -name 'livekit' \) 2>/dev/null | head -1)
-      if [ -z "$LK_BIN" ]; then
-        # Берём любой исполняемый файл из архива
-        LK_BIN=$(find /tmp/livekit-extract -type f -executable 2>/dev/null | head -1)
-      fi
-      if [ -n "$LK_BIN" ]; then
-        mv "$LK_BIN" /usr/local/bin/livekit-server
-        chmod +x /usr/local/bin/livekit-server
-        log "LiveKit server установлен"
-      else
-        warn "Не удалось найти бинарник LiveKit в архиве"
-      fi
-      rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
-    else
-      warn "Не удалось скачать LiveKit server"
+  if [ -z "$LK_TAG" ] || [ "$LK_TAG" = "null" ]; then
+    LK_TAG="v1.7.2"
+    warn "GitHub API недоступен — использую LiveKit $LK_TAG"
+  fi
+  wget -q --timeout=60 "https://github.com/livekit/livekit/releases/download/${LK_TAG}/livekit_linux_amd64.tar.gz" \
+    -O /tmp/livekit.tar.gz
+  if [ $? -eq 0 ]; then
+    mkdir -p /tmp/livekit-extract
+    tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/ 2>/dev/null
+    LK_BIN=$(find /tmp/livekit-extract -type f -executable \
+      \( -name 'livekit-server' -o -name 'livekit' \) 2>/dev/null | head -1)
+    if [ -z "$LK_BIN" ]; then
+      LK_BIN=$(find /tmp/livekit-extract -type f -executable 2>/dev/null | head -1)
     fi
+    if [ -n "$LK_BIN" ]; then
+      mv "$LK_BIN" /usr/local/bin/livekit-server
+      chmod +x /usr/local/bin/livekit-server
+      log "LiveKit server установлен ($LK_TAG)"
+    else
+      warn "Не удалось найти бинарник LiveKit в архиве"
+    fi
+    rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
+  else
+    warn "Не удалось скачать LiveKit server"
   fi
 
   # livekit-jwt-service
-  JWT_TAG=$(curl -s https://api.github.com/repos/element-hq/livekit-jwt-service/releases/latest \
+  JWT_TAG=$(curl -s --max-time 10 https://api.github.com/repos/element-hq/livekit-jwt-service/releases/latest \
     | jq -r .tag_name 2>/dev/null || true)
-  if [ -n "$JWT_TAG" ] && [ "$JWT_TAG" != "null" ]; then
-    wget -q "https://github.com/element-hq/livekit-jwt-service/releases/download/${JWT_TAG}/livekit-jwt-service-linux-amd64" \
-      -O /usr/local/bin/livekit-jwt-service
-    chmod +x /usr/local/bin/livekit-jwt-service 2>/dev/null || true
-    log "livekit-jwt-service скачан"
+  if [ -z "$JWT_TAG" ] || [ "$JWT_TAG" = "null" ]; then
+    JWT_TAG="v0.3.1"
+    warn "GitHub API недоступен — использую livekit-jwt-service $JWT_TAG"
+  fi
+  wget -q --timeout=60 "https://github.com/element-hq/livekit-jwt-service/releases/download/${JWT_TAG}/livekit-jwt-service-linux-amd64" \
+    -O /usr/local/bin/livekit-jwt-service
+  if [ $? -eq 0 ]; then
+    chmod +x /usr/local/bin/livekit-jwt-service
+    log "livekit-jwt-service установлен ($JWT_TAG)"
+  else
+    warn "Не удалось скачать livekit-jwt-service"
   fi
 
   mkdir -p /etc/livekit
