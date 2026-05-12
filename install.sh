@@ -6,13 +6,11 @@
 
 # ── Версии компонентов (обновлять здесь) ─────────────────
 ELEMENT_VERSION="v1.11.97"
-ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/${ELEMENT_VERSION}/element-${ELEMENT_VERSION}.tar.gz"
-SYNAPSE_ADMIN_VERSION="v0.10.3"
-SYNAPSE_ADMIN_URL="https://github.com/etkecc/synapse-admin/releases/download/${SYNAPSE_ADMIN_VERSION}/synapse-admin.tar.gz"
+ELEMENT_URL="https://ghproxy.com/https://github.com/element-hq/element-web/releases/download/${ELEMENT_VERSION}/element-${ELEMENT_VERSION}.tar.gz"
 LIVEKIT_VERSION="v1.11.0"
-LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/${LIVEKIT_VERSION}/livekit_linux_amd64.tar.gz"
+LIVEKIT_URL="https://ghproxy.com/https://github.com/livekit/livekit/releases/download/${LIVEKIT_VERSION}/livekit_linux_amd64.tar.gz"
 LIVEKIT_JWT_VERSION="v0.3.1"
-LIVEKIT_JWT_URL="https://github.com/element-hq/livekit-jwt-service/releases/download/${LIVEKIT_JWT_VERSION}/livekit-jwt-service-linux-amd64"
+LIVEKIT_JWT_URL="https://ghproxy.com/https://github.com/element-hq/livekit-jwt-service/releases/download/${LIVEKIT_JWT_VERSION}/livekit-jwt-service-linux-amd64"
 # ─────────────────────────────────────────────────────────
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
