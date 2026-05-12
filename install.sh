@@ -476,6 +476,12 @@ log "coturn настроен"
 # ══════════════════════════════════════════════════════════
 section "SSL (Let's Encrypt)"
 
+# Открываем порты ДО certbot — иначе Let's Encrypt не достучится
+ufw --force enable 2>/dev/null || true
+ufw allow ssh 2>/dev/null || true
+ufw allow 80/tcp 2>/dev/null || true
+ufw allow 443/tcp 2>/dev/null || true
+
 # Временный nginx чтобы certbot мог пройти http-01 challenge
 rm -f /etc/nginx/sites-enabled/default
 cat > /etc/nginx/sites-available/matrix-tmp <<NGINX
