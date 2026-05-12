@@ -541,8 +541,10 @@ server {
         add_header Access-Control-Allow-Origin * always;
     }
     location /element/ {
-        alias /var/www/html/element/;
-        try_files \$uri \$uri/ /element/index.html;
+        proxy_pass http://127.0.0.1:8765/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
     location /admin/ {
         alias /var/www/html/admin/;
@@ -613,15 +615,19 @@ log "Fail2ban настроен"
 # ══════════════════════════════════════════════════════════
 #  ELEMENT WEB
 # ══════════════════════════════════════════════════════════
-section "Element Web ($ELEMENT_VERSION)"
-wget -q --timeout=120 "$ELEMENT_URL" -O /tmp/element.tar.gz
-if [ $? -eq 0 ]; then
-  tar -xzf /tmp/element.tar.gz -C /tmp/ 2>/dev/null
-  rm -rf /var/www/html/element
-  ELEMENT_DIR=$(find /tmp -maxdepth 1 -name 'element-*' -type d 2>/dev/null | head -1)
-  if [ -n "$ELEMENT_DIR" ]; then
-    mv "$ELEMENT_DIR" /var/www/html/element
-    cat > /var/www/html/element/config.json <<EOF
+# ══════════════════════════════════════════════════════════
+#  ELEMENT WEB (Docker)
+# ══════════════════════════════════════════════════════════
+section "Element Web"
+# Устанавливаем Docker если нет
+if ! command -v docker >/dev/null 2>&1; then
+  info "Устанавливаю Docker..."
+  curl -fsSL https://get.docker.com | sh 2>/dev/null
+fi
+
+# Создаём конфиг
+mkdir -p /etc/element-web
+cat > /etc/element-web/config.json <<EOF
 {
     "default_server_config": {
         "m.homeserver": {
@@ -638,14 +644,24 @@ if [ $? -eq 0 ]; then
     }
 }
 EOF
-    chown -R www-data:www-data /var/www/html/element
-    log "Element Web установлен"
-  else
-    warn "Не удалось найти папку Element после распаковки"
-  fi
-  rm -f /tmp/element.tar.gz
+
+# Останавливаем старый контейнер если есть
+docker stop element-web 2>/dev/null || true
+docker rm element-web 2>/dev/null || true
+
+# Запускаем
+docker pull vectorim/element-web:latest 2>/dev/null
+docker run -d \
+  --name element-web \
+  --restart unless-stopped \
+  -p 127.0.0.1:8765:80 \
+  -v /etc/element-web/config.json:/app/config.json:ro \
+  vectorim/element-web:latest
+
+if [ $? -eq 0 ]; then
+  log "Element Web запущен на порту 8765"
 else
-  warn "Не удалось скачать Element Web"
+  warn "Не удалось запустить Element Web"
 fi
 
 # ══════════════════════════════════════════════════════════
@@ -672,26 +688,23 @@ if [ -n "$LIVEKIT_DOMAIN" ]; then
     echo "LIVEKIT_SECRET='$LIVEKIT_SECRET'" >> "$SECRETS_FILE"
   fi
 
-  # LiveKit server
-  wget -q --timeout=120 "$LIVEKIT_URL" -O /tmp/livekit.tar.gz
+  # LiveKit server через Docker
+  docker stop livekit-server 2>/dev/null || true
+  docker rm livekit-server 2>/dev/null || true
+  docker pull livekit/livekit-server:latest 2>/dev/null
+  docker run -d \
+    --name livekit-server \
+    --restart unless-stopped \
+    -p 7880:7880 \
+    -p 7881:7881 \
+    -p 50000-60000:50000-60000/udp \
+    -v /etc/livekit/livekit.yaml:/livekit.yaml \
+    livekit/livekit-server:latest \
+    --config /livekit.yaml
   if [ $? -eq 0 ]; then
-    mkdir -p /tmp/livekit-extract
-    tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/ 2>/dev/null
-    LK_BIN=$(find /tmp/livekit-extract -type f -executable \
-      \( -name 'livekit-server' -o -name 'livekit' \) 2>/dev/null | head -1)
-    if [ -z "$LK_BIN" ]; then
-      LK_BIN=$(find /tmp/livekit-extract -type f -executable 2>/dev/null | head -1)
-    fi
-    if [ -n "$LK_BIN" ]; then
-      mv "$LK_BIN" /usr/local/bin/livekit-server
-      chmod +x /usr/local/bin/livekit-server
-      log "LiveKit server установлен"
-    else
-      warn "Бинарник LiveKit не найден в архиве"
-    fi
-    rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
+    log "LiveKit server запущен через Docker"
   else
-    warn "Не удалось скачать LiveKit server"
+    warn "Не удалось запустить LiveKit server"
   fi
 
   # livekit-jwt-service
@@ -722,17 +735,6 @@ livekit_key: $LIVEKIT_KEY
 livekit_secret: $LIVEKIT_SECRET
 listen_addr: 127.0.0.1:8889
 EOF
-  cat > /etc/systemd/system/livekit.service <<EOF
-[Unit]
-Description=LiveKit Server
-After=network.target
-[Service]
-ExecStart=/usr/local/bin/livekit-server --config /etc/livekit/livekit.yaml
-Restart=always
-RestartSec=5
-[Install]
-WantedBy=multi-user.target
-EOF
   cat > /etc/systemd/system/livekit-jwt.service <<EOF
 [Unit]
 Description=LiveKit JWT Service
@@ -745,8 +747,8 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable livekit livekit-jwt 2>/dev/null || true
-  systemctl restart livekit livekit-jwt 2>/dev/null || true
+  systemctl enable livekit-jwt 2>/dev/null || true
+  systemctl restart livekit-jwt 2>/dev/null || true
 
   if [ ! -f "/etc/letsencrypt/live/$LIVEKIT_DOMAIN/fullchain.pem" ]; then
     certbot certonly --nginx -d "$LIVEKIT_DOMAIN" \
