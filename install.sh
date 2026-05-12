@@ -9,7 +9,7 @@ ELEMENT_VERSION="v1.11.97"
 ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/${ELEMENT_VERSION}/element-${ELEMENT_VERSION}.tar.gz"
 SYNAPSE_ADMIN_VERSION="v0.10.3"
 SYNAPSE_ADMIN_URL="https://github.com/etkecc/synapse-admin/releases/download/${SYNAPSE_ADMIN_VERSION}/synapse-admin.tar.gz"
-LIVEKIT_VERSION="v1.8.3"
+LIVEKIT_VERSION="v1.11.0"
 LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/${LIVEKIT_VERSION}/livekit_linux_amd64.tar.gz"
 LIVEKIT_JWT_VERSION="v0.3.1"
 LIVEKIT_JWT_URL="https://github.com/element-hq/livekit-jwt-service/releases/download/${LIVEKIT_JWT_VERSION}/livekit-jwt-service-linux-amd64"
@@ -653,27 +653,11 @@ fi
 # ══════════════════════════════════════════════════════════
 #  SYNAPSE ADMIN
 # ══════════════════════════════════════════════════════════
-section "Synapse Admin ($SYNAPSE_ADMIN_VERSION)"
-wget -q --timeout=120 "$SYNAPSE_ADMIN_URL" -O /tmp/synapse-admin.tar.gz
-if [ $? -eq 0 ]; then
-  mkdir -p /tmp/sadmin-extract
-  tar -xzf /tmp/synapse-admin.tar.gz -C /tmp/sadmin-extract/ 2>/dev/null || true
-  rm -rf /var/www/html/admin
-  SADMIN_DIR=$(find /tmp/sadmin-extract -name 'index.html' -maxdepth 3 2>/dev/null \
-    | head -1 | xargs dirname 2>/dev/null || true)
-  if [ -n "$SADMIN_DIR" ]; then
-    mv "$SADMIN_DIR" /var/www/html/admin
-    chown -R www-data:www-data /var/www/html/admin
-    log "Synapse Admin установлен"
-  else
-    warn "Synapse Admin: index.html не найден в архиве"
-    warn "Используй: https://awesome-technologies.github.io/synapse-admin/"
-  fi
-  rm -rf /tmp/sadmin-extract /tmp/synapse-admin.tar.gz
-else
-  warn "Не удалось скачать Synapse Admin"
-  warn "Используй: https://awesome-technologies.github.io/synapse-admin/"
-fi
+# ══════════════════════════════════════════════════════════
+#  SYNAPSE ADMIN — внешний, не устанавливаем
+# ══════════════════════════════════════════════════════════
+# Используем https://awesome-technologies.github.io/synapse-admin/
+# Там вводишь свой домен и логинишься — работает без установки
 
 # ══════════════════════════════════════════════════════════
 #  LIVEKIT (опционально)
@@ -928,7 +912,7 @@ fi
 # ══════════════════════════════════════════════════════════
 #  ИТОГ
 # ══════════════════════════════════════════════════════════
-ADMIN_URL="https://$DOMAIN/admin/"
+ADMIN_URL="https://awesome-technologies.github.io/synapse-admin/"
 
 echo ""
 echo -e "${GREEN}${BOLD}"
@@ -936,7 +920,6 @@ echo "  ╔═══════════════════════
 echo "  ║                      ГОТОВО!  🚀                            ║"
 echo "  ╠══════════════════════════════════════════════════════════════╣"
 printf  "  ║  Чат:      https://%s/element/\n" "$DOMAIN"
-printf  "  ║  Админка:  https://%s/admin/\n" "$DOMAIN"
 echo    "  ╠══════════════════════════════════════════════════════════════╣"
 printf  "  ║  Логин:    %-48s║\n" "$ADMIN_USER"
 printf  "  ║  Пароль:   %-48s║\n" "$ADMIN_PASS"
@@ -945,7 +928,7 @@ printf  "  ║  LiveKit:  %-48s║\n" "wss://$LIVEKIT_DOMAIN"
 fi
 echo    "  ╠══════════════════════════════════════════════════════════════╣"
 echo    "  ║  Команды:                                                    ║"
-echo    "  ║  bash install.sh       — это меню (бэкап, пароли, инвайт)  ║"
+echo    "  ║  bash install.sh       — меню (бэкап, пароли, инвайт)      ║"
 echo    "  ║  matrix-reset-password — сменить пароль                     ║"
 echo    "  ║  matrix-backup         — бэкап вручную                      ║"
 echo    "  ║  matrix-backup yes     — бэкап с медиафайлами               ║"
@@ -956,9 +939,13 @@ echo -e "  ${YELLOW}⚠  Бэкапы: $BACKUP_DIR (авто каждый ден
 echo -e "  ${YELLOW}⚠  Первый вход — нужен VPN (один раз)${NC}"
 echo -e "  ${YELLOW}⚠  iPhone: открывать ссылку в Safari, не в Телеграме${NC}"
 echo ""
-echo -e "  ${CYAN}${BOLD}━━━ Создавай пользователей через админку ━━━${NC}"
+echo -e "  ${CYAN}${BOLD}━━━ Управление пользователями ━━━${NC}"
 echo ""
+echo -e "  Открой в браузере:"
 echo -e "  ${BOLD}$ADMIN_URL${NC}"
+echo ""
+echo -e "  Homeserver URL: ${BOLD}https://$DOMAIN${NC}"
+echo -e "  Логин:          ${BOLD}$ADMIN_USER${NC}"
 echo ""
 if command -v qrencode >/dev/null 2>&1; then
   qrencode -t UTF8 -o - "$ADMIN_URL" 2>/dev/null | sed 's/^/  /'
