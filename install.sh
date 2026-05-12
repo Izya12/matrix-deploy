@@ -1,8 +1,19 @@
 #!/bin/bash
 # ============================================================
-#  Matrix Synapse — автоустановка v3.3
+#  Matrix Synapse — автоустановка v3.4
 #  Debian 12+  •  запуск от root
 # ============================================================
+
+# ── Версии компонентов (обновлять здесь) ─────────────────
+ELEMENT_VERSION="v1.11.97"
+ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/${ELEMENT_VERSION}/element-${ELEMENT_VERSION}.tar.gz"
+SYNAPSE_ADMIN_VERSION="v0.10.3"
+SYNAPSE_ADMIN_URL="https://github.com/etkecc/synapse-admin/releases/download/${SYNAPSE_ADMIN_VERSION}/synapse-admin.tar.gz"
+LIVEKIT_VERSION="v1.8.3"
+LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/${LIVEKIT_VERSION}/livekit_linux_amd64.tar.gz"
+LIVEKIT_JWT_VERSION="v0.3.1"
+LIVEKIT_JWT_URL="https://github.com/element-hq/livekit-jwt-service/releases/download/${LIVEKIT_JWT_VERSION}/livekit-jwt-service-linux-amd64"
+# ─────────────────────────────────────────────────────────
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -11,23 +22,16 @@ log()     { echo -e "${GREEN}[✓]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 info()    { echo -e "${BLUE}[i]${NC} $1"; }
 section() { echo -e "\n${CYAN}${BOLD}━━━ $1 ━━━${NC}"; }
-
-die() {
-  echo -e "${RED}[✗]${NC} $1"
-  exit 1
-}
+die()     { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
 if [ "$EUID" -ne 0 ]; then
   die "Запускай от root: sudo bash $0"
 fi
 
-# ── Пути и константы ─────────────────────────────────────
 SECRETS_FILE="/root/.matrix_secrets"
 PG_PASS_FILE="/root/.matrix_pg_pass"
 BACKUP_DIR="/opt/matrix-backups"
 BACKUP_KEEP=7
-
-# ── Переменные (все инициализированы) ────────────────────
 DOMAIN=""
 LIVEKIT_DOMAIN=""
 ADMIN_USER=""
@@ -45,29 +49,27 @@ LIVEKIT_SECRET=""
 # ══════════════════════════════════════════════════════════
 clear
 echo -e "\n${CYAN}${BOLD}  ╔══════════════════════════════════════════╗"
-echo    "  ║   Matrix Synapse  •  Deploy v3.3        ║"
+echo    "  ║   Matrix Synapse  •  Deploy v3.4        ║"
 echo -e "  ╚══════════════════════════════════════════╝${NC}\n"
 echo -e "  ${BOLD}1.${NC} Установить Matrix с нуля"
 echo -e "  ${BOLD}2.${NC} Починить / переустановить (данные сохраняются)"
 echo -e "  ${BOLD}3.${NC} Сменить пароль пользователя"
-echo -e "  ${BOLD}4.${NC} Создать бэкап"
-echo -e "  ${BOLD}5.${NC} Восстановить из бэкапа"
+echo -e "  ${BOLD}4.${NC} Создать ссылку для регистрации"
+echo -e "  ${BOLD}5.${NC} Создать бэкап"
+echo -e "  ${BOLD}6.${NC} Восстановить из бэкапа"
 echo ""
-read -rp "  Выбор [1-5]: " MENU_CHOICE
+read -rp "  Выбор [1-6]: " MENU_CHOICE
 
 # ══════════════════════════════════════════════════════════
 #  РЕЖИМ: СМЕНА ПАРОЛЯ
 # ══════════════════════════════════════════════════════════
 if [ "$MENU_CHOICE" = "3" ]; then
-  # Убеждаемся что bcrypt есть
   apt-get install -y -qq python3-bcrypt 2>/dev/null || true
-
   DOMAIN=$(grep '^server_name:' /etc/matrix-synapse/homeserver.yaml 2>/dev/null \
     | sed 's/server_name: *"\?\([^"]*\)"\?/\1/' | tr -d ' ')
   if [ -z "$DOMAIN" ]; then
     die "Matrix не найден на этом сервере"
   fi
-
   echo ""
   echo -e "${CYAN}${BOLD}━━━ Смена пароля ━━━${NC}\n"
   echo -e "${BLUE}[i]${NC} Пользователи на сервере:"
@@ -82,10 +84,8 @@ if [ "$MENU_CHOICE" = "3" ]; then
   while true; do
     read -rsp "Новый пароль: " P1; echo ""
     read -rsp "Повтори:      " P2; echo ""
-    if [ "$P1" = "$P2" ]; then
-      break
-    fi
-    warn "Пароли не совпадают, попробуй ещё раз"
+    if [ "$P1" = "$P2" ]; then break; fi
+    warn "Пароли не совпадают"
   done
   if [ ${#P1} -lt 6 ]; then
     die "Пароль слишком короткий (минимум 6 символов)"
@@ -105,11 +105,68 @@ print(bcrypt.hashpw(pw, bcrypt.gensalt()).decode())
 fi
 
 # ══════════════════════════════════════════════════════════
-#  РЕЖИМ: БЭКАП
+#  РЕЖИМ: ССЫЛКА ДЛЯ РЕГИСТРАЦИИ
 # ══════════════════════════════════════════════════════════
 if [ "$MENU_CHOICE" = "4" ]; then
+  DOMAIN=$(grep '^server_name:' /etc/matrix-synapse/homeserver.yaml 2>/dev/null \
+    | sed 's/server_name: *"\?\([^"]*\)"\?/\1/' | tr -d ' ')
+  if [ -z "$DOMAIN" ]; then
+    die "Matrix не найден на этом сервере"
+  fi
+  ACCESS_TOKEN=""
+  if [ -f /root/.matrix_access_token ]; then
+    ACCESS_TOKEN=$(cat /root/.matrix_access_token)
+  fi
+  if [ -z "$ACCESS_TOKEN" ]; then
+    echo ""
+    read -rp "Логин администратора: " ADM_U
+    read -rsp "Пароль администратора: " ADM_P; echo ""
+    ACCESS_TOKEN=$(curl -s -X POST "http://127.0.0.1:8008/_matrix/client/v3/login" \
+      -H "Content-Type: application/json" \
+      -d "{\"type\":\"m.login.password\",\"identifier\":{\"type\":\"m.id.user\",\"user\":\"$ADM_U\"},\"password\":\"$ADM_P\"}" \
+      | jq -r '.access_token // empty' 2>/dev/null || true)
+    if [ -n "$ACCESS_TOKEN" ]; then
+      echo "$ACCESS_TOKEN" > /root/.matrix_access_token
+      chmod 600 /root/.matrix_access_token
+    fi
+  fi
+  if [ -z "$ACCESS_TOKEN" ]; then
+    die "Не удалось получить токен. Проверь логин и пароль администратора."
+  fi
+  # Генерируем токен регистрации
+  REG_TOKEN=$(curl -s -X POST "http://127.0.0.1:8008/_synapse/admin/v1/registration_tokens/new" \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"uses_allowed": 1}' \
+    | jq -r '.token // empty' 2>/dev/null || true)
+  if [ -z "$REG_TOKEN" ]; then
+    die "Не удалось создать токен регистрации"
+  fi
+  # Ссылки
+  LOCAL_URL="https://${DOMAIN}/element/#/register?token=${REG_TOKEN}"
+  ELEMENT_URL_REG="https://app.element.io/#/register?hs_url=https%3A%2F%2F${DOMAIN}&token=${REG_TOKEN}"
+  echo ""
+  echo -e "${GREEN}${BOLD}━━━ Ссылка для регистрации ━━━${NC}\n"
+  echo -e "  ${BOLD}Токен:${NC} $REG_TOKEN"
+  echo -e "  ${YELLOW}(одноразовый, только для одного человека)${NC}\n"
+  echo -e "  ${BOLD}Для Android / ПК (через твой домен):${NC}"
+  echo -e "  $LOCAL_URL\n"
+  echo -e "  ${BOLD}Для iPhone (через app.element.io):${NC}"
+  echo -e "  $ELEMENT_URL_REG\n"
+  if command -v qrencode >/dev/null 2>&1; then
+    echo -e "  ${CYAN}QR для iPhone:${NC}"
+    qrencode -t UTF8 -o - "$ELEMENT_URL_REG" 2>/dev/null | sed 's/^/  /'
+  fi
+  echo ""
+  exit 0
+fi
+
+# ══════════════════════════════════════════════════════════
+#  РЕЖИМ: БЭКАП
+# ══════════════════════════════════════════════════════════
+if [ "$MENU_CHOICE" = "5" ]; then
   mkdir -p "$BACKUP_DIR"
-  read -rp "Включить медиафайлы (коты и прочее)? (y/n): " WITH_MEDIA
+  read -rp "Включить медиафайлы? (y/n): " WITH_MEDIA
   section "Бэкап"
   TMPDIR=$(mktemp -d)
   OUTFILE="$BACKUP_DIR/matrix-$(date +%Y-%m-%d_%H-%M).tar.gz"
@@ -134,7 +191,7 @@ fi
 # ══════════════════════════════════════════════════════════
 #  РЕЖИМ: ВОССТАНОВЛЕНИЕ
 # ══════════════════════════════════════════════════════════
-if [ "$MENU_CHOICE" = "5" ]; then
+if [ "$MENU_CHOICE" = "6" ]; then
   if [ ! -d "$BACKUP_DIR" ]; then
     die "Бэкапов не найдено в $BACKUP_DIR"
   fi
@@ -150,18 +207,12 @@ if [ "$MENU_CHOICE" = "5" ]; then
   done
   echo ""
   read -rp "  Номер бэкапа: " NUM
-  if ! echo "$NUM" | grep -qE '^[0-9]+$'; then
-    die "Неверный номер"
-  fi
-  if [ "$NUM" -lt 1 ] || [ "$NUM" -gt "${#BACKUPS[@]}" ]; then
-    die "Неверный номер"
-  fi
+  if ! echo "$NUM" | grep -qE '^[0-9]+$'; then die "Неверный номер"; fi
+  if [ "$NUM" -lt 1 ] || [ "$NUM" -gt "${#BACKUPS[@]}" ]; then die "Неверный номер"; fi
   CHOSEN="${BACKUPS[$((NUM-1))]}"
-  warn "Это ЗАМЕНИТ текущие данные содержимым: $(basename "$CHOSEN")"
+  warn "Это ЗАМЕНИТ текущие данные: $(basename "$CHOSEN")"
   read -rp "Уверен? Введи слово yes: " SURE
-  if [ "$SURE" != "yes" ]; then
-    die "Отмена"
-  fi
+  if [ "$SURE" != "yes" ]; then die "Отмена"; fi
   TMPDIR=$(mktemp -d)
   tar -xzf "$CHOSEN" -C "$TMPDIR"
   systemctl stop matrix-synapse 2>/dev/null || true
@@ -172,24 +223,16 @@ if [ "$MENU_CHOICE" = "5" ]; then
     su -c "pg_restore -d synapse" postgres < "$TMPDIR/synapse.dump"
     log "БД восстановлена"
   fi
-  if [ -d "$TMPDIR/conf" ]; then
-    cp -r "$TMPDIR/conf/." /etc/matrix-synapse/
-  fi
-  if [ -f "$TMPDIR/.matrix_secrets" ]; then
-    cp "$TMPDIR/.matrix_secrets" "$SECRETS_FILE"
-    chmod 600 "$SECRETS_FILE"
-  fi
-  if [ -f "$TMPDIR/.matrix_pg_pass" ]; then
-    cp "$TMPDIR/.matrix_pg_pass" "$PG_PASS_FILE"
-    chmod 600 "$PG_PASS_FILE"
-  fi
+  if [ -d "$TMPDIR/conf" ]; then cp -r "$TMPDIR/conf/." /etc/matrix-synapse/; fi
+  if [ -f "$TMPDIR/.matrix_secrets" ]; then cp "$TMPDIR/.matrix_secrets" "$SECRETS_FILE" && chmod 600 "$SECRETS_FILE"; fi
+  if [ -f "$TMPDIR/.matrix_pg_pass" ]; then cp "$TMPDIR/.matrix_pg_pass" "$PG_PASS_FILE" && chmod 600 "$PG_PASS_FILE"; fi
   if [ -d "$TMPDIR/media" ]; then
     cp -r "$TMPDIR/media/." /var/lib/matrix-synapse/media/
     chown -R matrix-synapse:matrix-synapse /var/lib/matrix-synapse/ 2>/dev/null || true
   fi
   rm -rf "$TMPDIR"
   systemctl start matrix-synapse
-  log "Восстановление завершено! Synapse запущен."
+  log "Восстановление завершено!"
   exit 0
 fi
 
@@ -201,9 +244,7 @@ if [ "$MENU_CHOICE" != "1" ] && [ "$MENU_CHOICE" != "2" ]; then
 fi
 
 MODE="install"
-if [ "$MENU_CHOICE" = "2" ]; then
-  MODE="repair"
-fi
+if [ "$MENU_CHOICE" = "2" ]; then MODE="repair"; fi
 
 # ── Ввод данных ───────────────────────────────────────────
 echo ""
@@ -215,69 +256,50 @@ if [ "$MODE" = "repair" ]; then
   if [ -n "$FOUND" ]; then
     info "Найден установленный домен: $FOUND"
     read -rp "  Использовать его? (y/n): " USE_IT
-    if [ "$USE_IT" = "y" ] || [ "$USE_IT" = "Y" ]; then
-      DOMAIN="$FOUND"
-    fi
+    if [ "$USE_IT" = "y" ] || [ "$USE_IT" = "Y" ]; then DOMAIN="$FOUND"; fi
   fi
-  if [ -f "$SECRETS_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$SECRETS_FILE" 2>/dev/null || true
-  fi
-  if [ -f "$PG_PASS_FILE" ]; then
-    PG_PASS=$(cat "$PG_PASS_FILE")
-  fi
+  if [ -f "$SECRETS_FILE" ]; then source "$SECRETS_FILE" 2>/dev/null || true; fi
+  if [ -f "$PG_PASS_FILE" ]; then PG_PASS=$(cat "$PG_PASS_FILE"); fi
 fi
 
 if [ -z "$DOMAIN" ]; then
   read -rp "  Домен Matrix (например matrix.example.com): " DOMAIN
 fi
-if [ -z "$DOMAIN" ]; then
-  die "Домен обязателен"
-fi
+if [ -z "$DOMAIN" ]; then die "Домен обязателен"; fi
 
 read -rp "  Email для SSL сертификата: " LE_EMAIL
-if [ -z "$LE_EMAIL" ]; then
-  die "Email обязателен"
-fi
+if [ -z "$LE_EMAIL" ]; then die "Email обязателен"; fi
 
 echo ""
-info "Для звонков в Element X нужен отдельный поддомен."
-info "Пример: если Matrix на matrix.example.com,"
-info "то LiveKit на livekit.example.com (та же A-запись, тот же IP)."
-read -rp "  Домен LiveKit (или Enter — пропустить): " LIVEKIT_DOMAIN
+info "Для звонков в Element X нужен отдельный поддомен LiveKit."
+info "Пример: livekit.example.com → тот же IP что и Matrix."
+info "Если не нужно — просто нажми Enter."
+read -rp "  Домен LiveKit: " LIVEKIT_DOMAIN
 
-# Генерируем имя и пароль админа
+# Генерируем имя админа
 ADMIN_SUFFIX=$(tr -dc '0-9' </dev/urandom | head -c4)
 ADMIN_USER="admin_${ADMIN_SUFFIX}"
 
 echo ""
-info "Имя администратора будет: ${BOLD}${ADMIN_USER}${NC}"
+info "Имя администратора: ${BOLD}${ADMIN_USER}${NC}"
 echo ""
 while true; do
   read -rsp "  Пароль администратора: " ADMIN_PASS; echo ""
   read -rsp "  Повтори пароль:        " ADMIN_PASS2; echo ""
-  if [ "$ADMIN_PASS" = "$ADMIN_PASS2" ]; then
-    break
-  fi
-  warn "Пароли не совпадают, попробуй ещё раз"
+  if [ "$ADMIN_PASS" = "$ADMIN_PASS2" ]; then break; fi
+  warn "Пароли не совпадают"
 done
-if [ ${#ADMIN_PASS} -lt 6 ]; then
-  die "Пароль слишком короткий (минимум 6 символов)"
-fi
+if [ ${#ADMIN_PASS} -lt 6 ]; then die "Пароль слишком короткий"; fi
 
 echo ""
 info "Домен Matrix:  $DOMAIN"
-if [ -n "$LIVEKIT_DOMAIN" ]; then
-  info "Домен LiveKit: $LIVEKIT_DOMAIN"
-fi
+if [ -n "$LIVEKIT_DOMAIN" ]; then info "Домен LiveKit: $LIVEKIT_DOMAIN"; fi
 info "Администратор: @${ADMIN_USER}:${DOMAIN}"
 echo ""
 read -rp "  Всё верно? (y/n): " CONFIRM
-if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
-  die "Отмена"
-fi
+if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then die "Отмена"; fi
 
-# ── Бэкап перед починкой ─────────────────────────────────
+# Бэкап перед починкой
 if [ "$MODE" = "repair" ]; then
   section "Бэкап перед починкой"
   mkdir -p "$BACKUP_DIR"
@@ -293,6 +315,19 @@ if [ "$MODE" = "repair" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════
+#  ОТКРЫВАЕМ ПОРТЫ ДО ВСЕГО ОСТАЛЬНОГО
+# ══════════════════════════════════════════════════════════
+section "Фаервол"
+ufw --force enable 2>/dev/null || true
+ufw allow ssh 2>/dev/null || true
+ufw allow 80/tcp 2>/dev/null || true
+ufw allow 443/tcp 2>/dev/null || true
+ufw allow 3478/tcp 2>/dev/null || true
+ufw allow 3478/udp 2>/dev/null || true
+ufw allow 49152:65535/udp 2>/dev/null || true
+log "Порты открыты"
+
+# ══════════════════════════════════════════════════════════
 #  ЗАВИСИМОСТИ
 # ══════════════════════════════════════════════════════════
 section "Зависимости"
@@ -301,7 +336,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   curl wget lsb-release apt-transport-https gnupg \
   nginx certbot python3-certbot-nginx \
   python3 python3-bcrypt \
-  ufw postgresql postgresql-contrib \
+  postgresql postgresql-contrib \
   fail2ban jq coturn qrencode
 log "Зависимости установлены"
 
@@ -318,15 +353,10 @@ else
   chmod 600 "$PG_PASS_FILE"
   log "Пароль БД сгенерирован"
 fi
-
 systemctl start postgresql
-
 HAS_USER=$(su -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='synapse'\"" postgres 2>/dev/null || true)
-if [ "$HAS_USER" != "1" ]; then
-  su -c "createuser synapse" postgres
-fi
+if [ "$HAS_USER" != "1" ]; then su -c "createuser synapse" postgres; fi
 su -c "psql -c \"ALTER USER synapse WITH PASSWORD '$PG_PASS';\"" postgres
-
 HAS_DB=$(su -c "psql -lqt" postgres 2>/dev/null | cut -d'|' -f1 | grep -w synapse | xargs 2>/dev/null || true)
 if [ -z "$HAS_DB" ]; then
   su -c "createdb --encoding=UTF8 --lc-collate=C --lc-ctype=C --template=template0 --owner=synapse synapse" postgres
@@ -345,28 +375,16 @@ https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
     > /etc/apt/sources.list.d/matrix-org.list
   apt-get update -qq
 fi
-
 echo "matrix-synapse matrix-synapse/server-name string $DOMAIN" | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq matrix-synapse-py3
 
 mkdir -p /etc/matrix-synapse/conf.d
 echo "server_name: \"$DOMAIN\"" > /etc/matrix-synapse/conf.d/server_name.yaml
 
-# Секреты — не перегенерируем при починке
-if [ -f "$SECRETS_FILE" ]; then
-  # shellcheck disable=SC1090
-  source "$SECRETS_FILE" 2>/dev/null || true
-  log "Секреты загружены"
-fi
-if [ -z "$REGISTRATION_SECRET" ]; then
-  REGISTRATION_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48)
-fi
-if [ -z "$MACAROON_SECRET" ]; then
-  MACAROON_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48)
-fi
-if [ -z "$TURN_SECRET" ]; then
-  TURN_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c32)
-fi
+if [ -f "$SECRETS_FILE" ]; then source "$SECRETS_FILE" 2>/dev/null || true; fi
+if [ -z "$REGISTRATION_SECRET" ]; then REGISTRATION_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48); fi
+if [ -z "$MACAROON_SECRET" ];     then MACAROON_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48); fi
+if [ -z "$TURN_SECRET" ];         then TURN_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c32); fi
 cat > "$SECRETS_FILE" <<EOF
 REGISTRATION_SECRET='$REGISTRATION_SECRET'
 MACAROON_SECRET='$MACAROON_SECRET'
@@ -374,13 +392,11 @@ TURN_SECRET='$TURN_SECRET'
 EOF
 chmod 600 "$SECRETS_FILE"
 
-# Права на медиа
 mkdir -p /var/lib/matrix-synapse/media
 chown -R matrix-synapse:matrix-synapse /var/lib/matrix-synapse/ 2>/dev/null \
   || chown -R www-data:www-data /var/lib/matrix-synapse/ 2>/dev/null || true
 chmod -R 750 /var/lib/matrix-synapse/
 
-# homeserver.yaml
 cat > /etc/matrix-synapse/homeserver.yaml <<EOF
 server_name: "$DOMAIN"
 public_baseurl: "https://$DOMAIN/"
@@ -475,23 +491,12 @@ log "coturn настроен"
 #  SSL
 # ══════════════════════════════════════════════════════════
 section "SSL (Let's Encrypt)"
-
-# Открываем порты ДО certbot — иначе Let's Encrypt не достучится
-ufw --force enable 2>/dev/null || true
-ufw allow ssh 2>/dev/null || true
-ufw allow 80/tcp 2>/dev/null || true
-ufw allow 443/tcp 2>/dev/null || true
-
-# Временный nginx чтобы certbot мог пройти http-01 challenge
 rm -f /etc/nginx/sites-enabled/default
 cat > /etc/nginx/sites-available/matrix-tmp <<NGINX
 server {
     listen 80;
     server_name $DOMAIN${LIVEKIT_DOMAIN:+ $LIVEKIT_DOMAIN};
-    location / {
-        return 200 'ok';
-        add_header Content-Type text/plain;
-    }
+    location / { return 200 'ok'; add_header Content-Type text/plain; }
 }
 NGINX
 ln -sf /etc/nginx/sites-available/matrix-tmp /etc/nginx/sites-enabled/matrix-tmp
@@ -499,18 +504,15 @@ nginx -t 2>/dev/null && systemctl restart nginx 2>/dev/null || true
 
 if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
   CERTBOT_DOMAINS="-d $DOMAIN"
-  if [ -n "$LIVEKIT_DOMAIN" ]; then
-    CERTBOT_DOMAINS="$CERTBOT_DOMAINS -d $LIVEKIT_DOMAIN"
-  fi
+  if [ -n "$LIVEKIT_DOMAIN" ]; then CERTBOT_DOMAINS="$CERTBOT_DOMAINS -d $LIVEKIT_DOMAIN"; fi
   certbot certonly --nginx $CERTBOT_DOMAINS \
     --non-interactive --agree-tos --email "$LE_EMAIL"
   if [ $? -ne 0 ]; then
-    die "Certbot не смог получить сертификат. Убедись что домен $DOMAIN указывает на IP этого сервера и порт 80 открыт."
+    die "Certbot не смог получить сертификат. Убедись что домен $DOMAIN указывает на IP этого сервера."
   fi
 else
   log "SSL сертификат уже есть — пропускаю"
 fi
-
 rm -f /etc/nginx/sites-enabled/matrix-tmp /etc/nginx/sites-available/matrix-tmp
 log "SSL готов"
 
@@ -533,29 +535,21 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
     add_header Strict-Transport-Security "max-age=31536000" always;
 
-    # Well-known для федерации
     location /.well-known/matrix/ {
         root /var/www/html;
         default_type application/json;
         add_header Access-Control-Allow-Origin * always;
     }
-
-    # Element Web
     location /element/ {
         alias /var/www/html/element/;
         try_files \$uri \$uri/ /element/index.html;
     }
-
-    # Synapse Admin
     location /admin/ {
         alias /var/www/html/admin/;
         try_files \$uri \$uri/ /admin/index.html;
     }
-
-    # Медиа — увеличенные таймауты для загрузки файлов
     location /_matrix/media/ {
         proxy_pass http://127.0.0.1:8008;
         proxy_set_header X-Forwarded-For \$remote_addr;
@@ -566,8 +560,6 @@ server {
         proxy_send_timeout 300s;
         proxy_buffering off;
     }
-
-    # Всё остальное → Synapse
     location / {
         proxy_pass http://127.0.0.1:8008;
         proxy_set_header X-Forwarded-For \$remote_addr;
@@ -577,15 +569,12 @@ server {
     }
 }
 NGINX
-
 ln -sf /etc/nginx/sites-available/matrix /etc/nginx/sites-enabled/matrix
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 log "Nginx настроен"
 
-# ══════════════════════════════════════════════════════════
-#  WELL-KNOWN
-# ══════════════════════════════════════════════════════════
+# Well-known
 mkdir -p /var/www/html/.well-known/matrix
 printf '{"m.homeserver":{"base_url":"https://%s"}}' "$DOMAIN" \
   > /var/www/html/.well-known/matrix/client
@@ -614,13 +603,11 @@ maxretry = 10
 findtime = 300
 bantime  = 3600
 EOF
-
 cat > /etc/fail2ban/filter.d/matrix-synapse.conf <<'EOF'
 [Definition]
 failregex = ^<HOST> .* "POST /_matrix/client/.*/login HTTP.*" 4[0-9][0-9]
 ignoreregex =
 EOF
-
 systemctl enable fail2ban 2>/dev/null || true
 systemctl restart fail2ban 2>/dev/null || true
 log "Fail2ban настроен"
@@ -628,22 +615,15 @@ log "Fail2ban настроен"
 # ══════════════════════════════════════════════════════════
 #  ELEMENT WEB
 # ══════════════════════════════════════════════════════════
-section "Element Web"
-ELEMENT_TAG=$(curl -s https://api.github.com/repos/element-hq/element-web/releases/latest \
-  | jq -r .tag_name 2>/dev/null || true)
-if [ -z "$ELEMENT_TAG" ] || [ "$ELEMENT_TAG" = "null" ]; then
-  warn "Не удалось получить версию Element — пропускаю"
-else
-  log "Скачиваю Element $ELEMENT_TAG..."
-  wget -q "https://github.com/element-hq/element-web/releases/download/${ELEMENT_TAG}/element-${ELEMENT_TAG}.tar.gz" \
-    -O /tmp/element.tar.gz
-  if [ $? -eq 0 ]; then
-    tar -xzf /tmp/element.tar.gz -C /tmp/ 2>/dev/null
-    rm -rf /var/www/html/element
-    ELEMENT_DIR=$(find /tmp -maxdepth 1 -name 'element-*' -type d 2>/dev/null | head -1)
-    if [ -n "$ELEMENT_DIR" ]; then
-      mv "$ELEMENT_DIR" /var/www/html/element
-      cat > /var/www/html/element/config.json <<EOF
+section "Element Web ($ELEMENT_VERSION)"
+wget -q --timeout=120 "$ELEMENT_URL" -O /tmp/element.tar.gz
+if [ $? -eq 0 ]; then
+  tar -xzf /tmp/element.tar.gz -C /tmp/ 2>/dev/null
+  rm -rf /var/www/html/element
+  ELEMENT_DIR=$(find /tmp -maxdepth 1 -name 'element-*' -type d 2>/dev/null | head -1)
+  if [ -n "$ELEMENT_DIR" ]; then
+    mv "$ELEMENT_DIR" /var/www/html/element
+    cat > /var/www/html/element/config.json <<EOF
 {
     "default_server_config": {
         "m.homeserver": {
@@ -660,39 +640,21 @@ else
     }
 }
 EOF
-      chown -R www-data:www-data /var/www/html/element
-      log "Element Web установлен"
-    else
-      warn "Не удалось найти папку Element после распаковки"
-    fi
-    rm -f /tmp/element.tar.gz
+    chown -R www-data:www-data /var/www/html/element
+    log "Element Web установлен"
   else
-    warn "Не удалось скачать Element"
+    warn "Не удалось найти папку Element после распаковки"
   fi
+  rm -f /tmp/element.tar.gz
+else
+  warn "Не удалось скачать Element Web"
 fi
 
 # ══════════════════════════════════════════════════════════
 #  SYNAPSE ADMIN
 # ══════════════════════════════════════════════════════════
-section "Synapse Admin"
-ADMIN_TAG=$(curl -s --max-time 10 https://api.github.com/repos/element-hq/synapse-admin/releases/latest \
-  | jq -r .tag_name 2>/dev/null || true)
-if [ -z "$ADMIN_TAG" ] || [ "$ADMIN_TAG" = "null" ]; then
-  ADMIN_TAG=$(curl -s --max-time 10 https://api.github.com/repos/etkecc/synapse-admin/releases/latest \
-    | jq -r .tag_name 2>/dev/null || true)
-  SADMIN_REPO="etkecc"
-else
-  SADMIN_REPO="element-hq"
-fi
-# Фолбэк на известную рабочую версию
-if [ -z "$ADMIN_TAG" ] || [ "$ADMIN_TAG" = "null" ]; then
-  ADMIN_TAG="v0.10.3"
-  SADMIN_REPO="etkecc"
-  warn "GitHub API недоступен — использую версию $ADMIN_TAG"
-fi
-
-SADMIN_URL="https://github.com/${SADMIN_REPO}/synapse-admin/releases/download/${ADMIN_TAG}/synapse-admin.tar.gz"
-wget -q --timeout=60 "$SADMIN_URL" -O /tmp/synapse-admin.tar.gz 2>/dev/null
+section "Synapse Admin ($SYNAPSE_ADMIN_VERSION)"
+wget -q --timeout=120 "$SYNAPSE_ADMIN_URL" -O /tmp/synapse-admin.tar.gz
 if [ $? -eq 0 ]; then
   mkdir -p /tmp/sadmin-extract
   tar -xzf /tmp/synapse-admin.tar.gz -C /tmp/sadmin-extract/ 2>/dev/null || true
@@ -702,25 +664,24 @@ if [ $? -eq 0 ]; then
   if [ -n "$SADMIN_DIR" ]; then
     mv "$SADMIN_DIR" /var/www/html/admin
     chown -R www-data:www-data /var/www/html/admin
-    log "Synapse Admin установлен ($ADMIN_TAG)"
+    log "Synapse Admin установлен"
   else
-    warn "Не удалось найти index.html в архиве Synapse Admin"
+    warn "Synapse Admin: index.html не найден в архиве"
+    warn "Используй: https://awesome-technologies.github.io/synapse-admin/"
   fi
   rm -rf /tmp/sadmin-extract /tmp/synapse-admin.tar.gz
 else
-  warn "Не удалось скачать Synapse Admin — пропускаю"
+  warn "Не удалось скачать Synapse Admin"
+  warn "Используй: https://awesome-technologies.github.io/synapse-admin/"
 fi
 
 # ══════════════════════════════════════════════════════════
 #  LIVEKIT (опционально)
 # ══════════════════════════════════════════════════════════
 if [ -n "$LIVEKIT_DOMAIN" ]; then
-  section "LiveKit"
+  section "LiveKit ($LIVEKIT_VERSION)"
   LIVEKIT_KEY="matrix"
-
-  # Загружаем существующие ключи или генерируем новые
   if grep -q 'LIVEKIT_SECRET' "$SECRETS_FILE" 2>/dev/null; then
-    # shellcheck disable=SC1090
     source "$SECRETS_FILE" 2>/dev/null || true
   fi
   if [ -z "$LIVEKIT_SECRET" ]; then
@@ -730,14 +691,7 @@ if [ -n "$LIVEKIT_DOMAIN" ]; then
   fi
 
   # LiveKit server
-  LK_TAG=$(curl -s --max-time 10 https://api.github.com/repos/livekit/livekit/releases/latest \
-    | jq -r .tag_name 2>/dev/null || true)
-  if [ -z "$LK_TAG" ] || [ "$LK_TAG" = "null" ]; then
-    LK_TAG="v1.7.2"
-    warn "GitHub API недоступен — использую LiveKit $LK_TAG"
-  fi
-  wget -q --timeout=60 "https://github.com/livekit/livekit/releases/download/${LK_TAG}/livekit_linux_amd64.tar.gz" \
-    -O /tmp/livekit.tar.gz
+  wget -q --timeout=120 "$LIVEKIT_URL" -O /tmp/livekit.tar.gz
   if [ $? -eq 0 ]; then
     mkdir -p /tmp/livekit-extract
     tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/ 2>/dev/null
@@ -749,9 +703,9 @@ if [ -n "$LIVEKIT_DOMAIN" ]; then
     if [ -n "$LK_BIN" ]; then
       mv "$LK_BIN" /usr/local/bin/livekit-server
       chmod +x /usr/local/bin/livekit-server
-      log "LiveKit server установлен ($LK_TAG)"
+      log "LiveKit server установлен"
     else
-      warn "Не удалось найти бинарник LiveKit в архиве"
+      warn "Бинарник LiveKit не найден в архиве"
     fi
     rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
   else
@@ -759,17 +713,10 @@ if [ -n "$LIVEKIT_DOMAIN" ]; then
   fi
 
   # livekit-jwt-service
-  JWT_TAG=$(curl -s --max-time 10 https://api.github.com/repos/element-hq/livekit-jwt-service/releases/latest \
-    | jq -r .tag_name 2>/dev/null || true)
-  if [ -z "$JWT_TAG" ] || [ "$JWT_TAG" = "null" ]; then
-    JWT_TAG="v0.3.1"
-    warn "GitHub API недоступен — использую livekit-jwt-service $JWT_TAG"
-  fi
-  wget -q --timeout=60 "https://github.com/element-hq/livekit-jwt-service/releases/download/${JWT_TAG}/livekit-jwt-service-linux-amd64" \
-    -O /usr/local/bin/livekit-jwt-service
+  wget -q --timeout=60 "$LIVEKIT_JWT_URL" -O /usr/local/bin/livekit-jwt-service
   if [ $? -eq 0 ]; then
     chmod +x /usr/local/bin/livekit-jwt-service
-    log "livekit-jwt-service установлен ($JWT_TAG)"
+    log "livekit-jwt-service установлен"
   else
     warn "Не удалось скачать livekit-jwt-service"
   fi
@@ -787,14 +734,12 @@ keys:
 logging:
   level: info
 EOF
-
   cat > /etc/livekit/jwt.yaml <<EOF
 livekit_url: wss://$LIVEKIT_DOMAIN
 livekit_key: $LIVEKIT_KEY
 livekit_secret: $LIVEKIT_SECRET
 listen_addr: 127.0.0.1:8889
 EOF
-
   cat > /etc/systemd/system/livekit.service <<EOF
 [Unit]
 Description=LiveKit Server
@@ -806,7 +751,6 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-
   cat > /etc/systemd/system/livekit-jwt.service <<EOF
 [Unit]
 Description=LiveKit JWT Service
@@ -818,19 +762,16 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-
   systemctl daemon-reload
   systemctl enable livekit livekit-jwt 2>/dev/null || true
   systemctl restart livekit livekit-jwt 2>/dev/null || true
 
-  # SSL для LiveKit домена
   if [ ! -f "/etc/letsencrypt/live/$LIVEKIT_DOMAIN/fullchain.pem" ]; then
     certbot certonly --nginx -d "$LIVEKIT_DOMAIN" \
       --non-interactive --agree-tos --email "$LE_EMAIL" 2>/dev/null \
       || warn "Не удалось получить сертификат для $LIVEKIT_DOMAIN"
   fi
 
-  # Nginx блок для LiveKit
   cat >> /etc/nginx/sites-available/matrix <<NGINX
 
 server {
@@ -838,7 +779,6 @@ server {
     server_name $LIVEKIT_DOMAIN;
     return 301 https://\$host\$request_uri;
 }
-
 server {
     listen 443 ssl http2;
     server_name $LIVEKIT_DOMAIN;
@@ -846,7 +786,6 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/$LIVEKIT_DOMAIN/privkey.pem;
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
     location / {
         proxy_pass http://127.0.0.1:7880;
         proxy_http_version 1.1;
@@ -855,47 +794,29 @@ server {
         proxy_set_header Host \$host;
         proxy_read_timeout 86400s;
     }
-
     location /_matrix/client/unstable/com.element.msc4143/openid/request_token {
         proxy_pass http://127.0.0.1:8889;
         proxy_set_header Host \$host;
     }
 }
 NGINX
-
   nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
 
-  # Synapse конфиг для LiveKit
   cat > /etc/matrix-synapse/conf.d/livekit.yaml <<EOF
 experimental_features:
   msc3266_enabled: true
   msc4143_enabled: true
-
 livekit:
   url: wss://$LIVEKIT_DOMAIN
   jwt_service_url: https://$LIVEKIT_DOMAIN/_matrix/client/unstable/com.element.msc4143/openid/request_token
 EOF
-
   ufw allow 7881/tcp 2>/dev/null || true
   ufw allow 50000:60000/udp 2>/dev/null || true
   log "LiveKit настроен"
 fi
 
 # ══════════════════════════════════════════════════════════
-#  UFW
-# ══════════════════════════════════════════════════════════
-section "Фаервол"
-ufw --force enable 2>/dev/null || true
-ufw allow ssh 2>/dev/null || true
-ufw allow 80/tcp 2>/dev/null || true
-ufw allow 443/tcp 2>/dev/null || true
-ufw allow 3478/tcp 2>/dev/null || true
-ufw allow 3478/udp 2>/dev/null || true
-ufw allow 49152:65535/udp 2>/dev/null || true
-log "UFW настроен"
-
-# ══════════════════════════════════════════════════════════
-#  АВТОБЭКАП
+#  АВТОБЭКАП + КОМАНДЫ
 # ══════════════════════════════════════════════════════════
 mkdir -p "$BACKUP_DIR"
 cat > /usr/local/bin/matrix-backup <<SCRIPT
@@ -915,17 +836,13 @@ if [ "\$WITH_MEDIA" = "yes" ]; then
 fi
 tar -czf "\$OUTFILE" -C "\$TMPDIR" . 2>/dev/null
 rm -rf "\$TMPDIR"
-SIZE=\$(du -sh "\$OUTFILE" 2>/dev/null | cut -f1)
-echo "\$(date): Бэкап сохранён: \$OUTFILE (\$SIZE)"
+echo "\$(date): \$OUTFILE (\$(du -sh \$OUTFILE 2>/dev/null | cut -f1))"
 ls -t "\$BACKUP_DIR"/matrix-*.tar.gz 2>/dev/null | tail -n +\$((BACKUP_KEEP+1)) | xargs rm -f 2>/dev/null || true
 SCRIPT
 chmod +x /usr/local/bin/matrix-backup
 echo "0 2 * * * root /usr/local/bin/matrix-backup >> /var/log/matrix-backup.log 2>&1" \
   > /etc/cron.d/matrix-backup
 
-# ══════════════════════════════════════════════════════════
-#  MATRIX-RESET-PASSWORD
-# ══════════════════════════════════════════════════════════
 cat > /usr/local/bin/matrix-reset-password <<SCRIPT
 #!/bin/bash
 DOMAIN="$DOMAIN"
@@ -933,15 +850,12 @@ apt-get install -y -qq python3-bcrypt 2>/dev/null || true
 echo ""
 echo "=== Смена пароля Matrix ==="
 echo ""
-echo "Пользователи на сервере:"
+echo "Пользователи:"
 su -c "psql -d synapse -tAc \"SELECT name FROM users WHERE deactivated=0 ORDER BY creation_ts;\"" \
   postgres 2>/dev/null | sed 's/^/  /' || echo "  (не удалось получить список)"
 echo ""
-read -rp "Имя пользователя (можно без @домен): " U
-if [ "\${U:0:1}" != "@" ]; then
-  U="@\${U}:\${DOMAIN}"
-fi
-echo "Меняем пароль для: \$U"
+read -rp "Имя (можно без @домен): " U
+if [ "\${U:0:1}" != "@" ]; then U="@\${U}:\${DOMAIN}"; fi
 while true; do
   read -rsp "Новый пароль: " P1; echo ""
   read -rsp "Повтори:      " P2; echo ""
@@ -953,16 +867,12 @@ import bcrypt, sys
 pw = sys.argv[1].encode('utf-8')
 print(bcrypt.hashpw(pw, bcrypt.gensalt()).decode())
 " "\$P1" 2>/dev/null)
-if [ -z "\$HASH" ]; then
-  echo "Ошибка хеширования пароля"
-  exit 1
-fi
+if [ -z "\$HASH" ]; then echo "Ошибка хеширования"; exit 1; fi
 su -c "psql -d synapse -c \"UPDATE users SET password_hash='\$HASH' WHERE name='\$U';\"" postgres
-echo "Готово! Пользователю нужно выйти и войти заново в Element."
+echo "Готово! Пользователю нужно выйти и войти заново."
 SCRIPT
 chmod +x /usr/local/bin/matrix-reset-password
 
-# Certbot renewal
 echo "0 3 * * * root certbot renew --quiet --nginx" > /etc/cron.d/certbot-renew
 
 # ══════════════════════════════════════════════════════════
@@ -985,14 +895,13 @@ for i in $(seq 1 45); do
   sleep 2
 done
 echo ""
-
 if [ "$SYNAPSE_OK" -ne 1 ]; then
-  die "Synapse не поднялся. Смотри лог: journalctl -u matrix-synapse -n 50"
+  die "Synapse не поднялся. Смотри: journalctl -u matrix-synapse -n 50"
 fi
 log "Synapse запущен"
 
 # ══════════════════════════════════════════════════════════
-#  СОЗДАНИЕ АДМИНИСТРАТОРА
+#  АДМИНИСТРАТОР
 # ══════════════════════════════════════════════════════════
 section "Администратор"
 register_new_matrix_user \
@@ -1002,7 +911,16 @@ register_new_matrix_user \
   && log "Администратор @${ADMIN_USER}:${DOMAIN} создан" \
   || warn "Пользователь уже существует — пропускаю"
 
-# Перезапуск если LiveKit добавили конфиг
+sleep 2
+ACCESS_TOKEN=$(curl -s -X POST "http://127.0.0.1:8008/_matrix/client/v3/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"m.login.password\",\"identifier\":{\"type\":\"m.id.user\",\"user\":\"$ADMIN_USER\"},\"password\":\"$ADMIN_PASS\"}" \
+  | jq -r '.access_token // empty' 2>/dev/null || true)
+if [ -n "$ACCESS_TOKEN" ]; then
+  echo "$ACCESS_TOKEN" > /root/.matrix_access_token
+  chmod 600 /root/.matrix_access_token
+fi
+
 if [ -n "$LIVEKIT_DOMAIN" ]; then
   systemctl restart matrix-synapse 2>/dev/null || true
 fi
@@ -1010,35 +928,37 @@ fi
 # ══════════════════════════════════════════════════════════
 #  ИТОГ
 # ══════════════════════════════════════════════════════════
+ADMIN_URL="https://$DOMAIN/admin/"
+
 echo ""
 echo -e "${GREEN}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════════════╗"
 echo "  ║                      ГОТОВО!  🚀                            ║"
 echo "  ╠══════════════════════════════════════════════════════════════╣"
-printf  "  ║  Element:  https://%s/element/\n" "$DOMAIN"
+printf  "  ║  Чат:      https://%s/element/\n" "$DOMAIN"
 printf  "  ║  Админка:  https://%s/admin/\n" "$DOMAIN"
 echo    "  ╠══════════════════════════════════════════════════════════════╣"
-printf  "  ║  Логин админа:  %-44s║\n" "$ADMIN_USER"
-printf  "  ║  Пароль:        %-44s║\n" "$ADMIN_PASS"
+printf  "  ║  Логин:    %-48s║\n" "$ADMIN_USER"
+printf  "  ║  Пароль:   %-48s║\n" "$ADMIN_PASS"
 if [ -n "$LIVEKIT_DOMAIN" ]; then
-printf  "  ║  LiveKit:  wss://%-43s║\n" "$LIVEKIT_DOMAIN"
+printf  "  ║  LiveKit:  %-48s║\n" "wss://$LIVEKIT_DOMAIN"
 fi
 echo    "  ╠══════════════════════════════════════════════════════════════╣"
 echo    "  ║  Команды:                                                    ║"
-echo    "  ║  matrix-reset-password  — сменить пароль пользователя       ║"
-echo    "  ║  matrix-backup          — бэкап вручную                     ║"
-echo    "  ║  matrix-backup yes      — бэкап с медиафайлами              ║"
+echo    "  ║  bash install.sh       — это меню (бэкап, пароли, инвайт)  ║"
+echo    "  ║  matrix-reset-password — сменить пароль                     ║"
+echo    "  ║  matrix-backup         — бэкап вручную                      ║"
+echo    "  ║  matrix-backup yes     — бэкап с медиафайлами               ║"
 echo    "  ╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
-echo -e "  ${YELLOW}⚠  Запиши логин и пароль администратора!${NC}"
-echo -e "  ${YELLOW}⚠  Бэкапы: $BACKUP_DIR  (авто каждый день в 02:00)${NC}"
+echo -e "  ${YELLOW}⚠  ЗАПИШИ логин и пароль администратора!${NC}"
+echo -e "  ${YELLOW}⚠  Бэкапы: $BACKUP_DIR (авто каждый день в 02:00)${NC}"
 echo -e "  ${YELLOW}⚠  Первый вход — нужен VPN (один раз)${NC}"
 echo -e "  ${YELLOW}⚠  iPhone: открывать ссылку в Safari, не в Телеграме${NC}"
 echo ""
-echo -e "  ${CYAN}${BOLD}━━━ Открой и создавай пользователей через админку ━━━${NC}"
+echo -e "  ${CYAN}${BOLD}━━━ Создавай пользователей через админку ━━━${NC}"
 echo ""
-ADMIN_URL="https://$DOMAIN/admin/"
-echo -e "  ${BOLD}${ADMIN_URL}${NC}"
+echo -e "  ${BOLD}$ADMIN_URL${NC}"
 echo ""
 if command -v qrencode >/dev/null 2>&1; then
   qrencode -t UTF8 -o - "$ADMIN_URL" 2>/dev/null | sed 's/^/  /'
