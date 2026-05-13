@@ -304,13 +304,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   fail2ban jq coturn qrencode
 log "Зависимости установлены"
 
-# Docker
-if ! command -v docker >/dev/null 2>&1; then
-  info "Устанавливаю Docker..."
-  curl -fsSL https://get.docker.com | sh 2>/dev/null
-  log "Docker установлен"
-fi
-
 # ══════════════════════════════════════════════════════════
 #  POSTGRESQL
 # ══════════════════════════════════════════════════════════
@@ -325,16 +318,16 @@ else
   log "Пароль БД сгенерирован"
 fi
 systemctl start postgresql
-HAS_USER=$(su -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='synapse'\"" \
+HAS_USER=$(cd /tmp && su -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='synapse'\"" \
   postgres 2>/dev/null || true)
 if [ "$HAS_USER" != "1" ]; then
-  su -c "psql -c \"CREATE USER synapse WITH PASSWORD '$PG_PASS';\"" postgres
+  cd /tmp && su -c "psql -c \"CREATE USER synapse WITH PASSWORD '$PG_PASS';\"" postgres
 fi
-su -c "psql -c \"ALTER USER synapse WITH PASSWORD '$PG_PASS';\"" postgres
-HAS_DB=$(su -c "psql -lqt" postgres 2>/dev/null \
+cd /tmp && su -c "psql -c \"ALTER USER synapse WITH PASSWORD '$PG_PASS';\"" postgres
+HAS_DB=$(cd /tmp && su -c "psql -lqt" postgres 2>/dev/null \
   | cut -d'|' -f1 | grep -w synapse | xargs 2>/dev/null || true)
 if [ -z "$HAS_DB" ]; then
-  su -c "createdb --encoding=UTF8 --lc-collate=C --lc-ctype=C \
+  cd /tmp && su -c "createdb --encoding=UTF8 --lc-collate=C --lc-ctype=C \
     --template=template0 --owner=synapse synapse" postgres
 fi
 log "PostgreSQL готов"
@@ -500,11 +493,17 @@ rm -f /etc/nginx/sites-enabled/matrix-tmp /etc/nginx/sites-available/matrix-tmp
 log "SSL готов"
 
 # ══════════════════════════════════════════════════════════
-#  ELEMENT WEB (Docker)
+#  ELEMENT WEB
 # ══════════════════════════════════════════════════════════
 section "Element Web"
-mkdir -p /etc/element-web
-cat > /etc/element-web/config.json <<EOF
+ELEMENT_VERSION="v1.12.18"
+ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/${ELEMENT_VERSION}/element-${ELEMENT_VERSION}.tar.gz"
+wget --timeout=120 "$ELEMENT_URL" -O /tmp/element.tar.gz
+if [ $? -eq 0 ] && file /tmp/element.tar.gz | grep -q compressed; then
+  rm -rf /var/www/html/element
+  mkdir -p /var/www/html/element
+  tar -xzf /tmp/element.tar.gz -C /var/www/html/element --strip-components=1
+  cat > /var/www/html/element/config.json <<EOF
 {
     "default_server_config": {
         "m.homeserver": {
@@ -521,19 +520,12 @@ cat > /etc/element-web/config.json <<EOF
     }
 }
 EOF
-docker stop element-web 2>/dev/null || true
-docker rm element-web 2>/dev/null || true
-docker pull vectorim/element-web:latest 2>/dev/null
-docker run -d \
-  --name element-web \
-  --restart unless-stopped \
-  -p 127.0.0.1:8765:80 \
-  -v /etc/element-web/config.json:/app/config.json:ro \
-  vectorim/element-web:latest
-if [ $? -eq 0 ]; then
-  log "Element Web запущен"
+  chown -R www-data:www-data /var/www/html/element
+  rm -f /tmp/element.tar.gz
+  log "Element Web $ELEMENT_VERSION установлен"
 else
-  warn "Не удалось запустить Element Web"
+  warn "Не удалось скачать Element Web"
+  rm -f /tmp/element.tar.gz
 fi
 
 # ══════════════════════════════════════════════════════════
@@ -563,12 +555,15 @@ server {
         add_header Access-Control-Allow-Origin * always;
     }
 
-    # Element Web через Docker
-    location / {
-        proxy_pass http://127.0.0.1:8765;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Forwarded-For \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+    # Element Web — статика
+    location /element/ {
+        alias /var/www/html/element/;
+        try_files $uri $uri/ /element/index.html;
+    }
+
+    # Корень — редирект на Element
+    location = / {
+        return 301 /element/;
     }
 
     # Медиа — большие таймауты
@@ -597,6 +592,14 @@ server {
         proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Host \$host;
+    }
+
+    # LiveKit JWT — токены выдаёт основной домен
+    location /_matrix/client/unstable/com.element.msc4143/openid/request_token {
+        proxy_pass http://127.0.0.1:8889;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 NGINX
@@ -705,31 +708,67 @@ logging:
   level: info
 EOF
 
-  # LiveKit server через Docker с --network host
-  docker stop livekit-server 2>/dev/null || true
-  docker rm livekit-server 2>/dev/null || true
-  docker pull livekit/livekit-server:latest 2>/dev/null
-  docker run -d \
-    --name livekit-server \
-    --restart unless-stopped \
-    --network host \
-    -v /etc/livekit/livekit.yaml:/livekit.yaml \
-    livekit/livekit-server:latest \
-    --config /livekit.yaml
-  if [ $? -eq 0 ]; then
-    log "LiveKit server запущен"
+  # LiveKit server — бинарник
+  LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/v1.11.0/livekit_1.11.0_linux_amd64.tar.gz"
+  wget --timeout=120 "$LIVEKIT_URL" -O /tmp/livekit.tar.gz
+  if [ $? -eq 0 ] && file /tmp/livekit.tar.gz | grep -q compressed; then
+    mkdir -p /tmp/livekit-extract
+    tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/
+    LK_BIN=$(find /tmp/livekit-extract -type f -executable 2>/dev/null | head -1)
+    if [ -n "$LK_BIN" ]; then
+      mv "$LK_BIN" /usr/local/bin/livekit-server
+      chmod +x /usr/local/bin/livekit-server
+      log "LiveKit server установлен"
+    else
+      warn "Бинарник LiveKit не найден в архиве"
+    fi
+    rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
   else
-    warn "Не удалось запустить LiveKit server"
+    warn "Не удалось скачать LiveKit server"
+    rm -f /tmp/livekit.tar.gz
   fi
 
-  # livekit-jwt-service
-  JWT_JWT_URL="https://ghproxy.com/https://github.com/element-hq/livekit-jwt-service/releases/download/v0.3.1/livekit-jwt-service-linux-amd64"
-  wget -q --timeout=60 "$JWT_JWT_URL" -O /usr/local/bin/livekit-jwt-service
-  if [ $? -eq 0 ]; then
+  cat > /etc/systemd/system/livekit.service <<EOF
+[Unit]
+Description=LiveKit Server
+After=network.target
+[Service]
+ExecStart=/usr/local/bin/livekit-server --config /etc/livekit/livekit.yaml
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable livekit 2>/dev/null || true
+  systemctl restart livekit 2>/dev/null || true
+
+  # livekit-jwt-service (новое название: lk-jwt-service)
+  wget -q --timeout=60 \
+    "https://github.com/element-hq/lk-jwt-service/releases/latest/download/lk-jwt-service_linux_amd64" \
+    -O /usr/local/bin/livekit-jwt-service
+  if [ $? -eq 0 ] && file /usr/local/bin/livekit-jwt-service | grep -q ELF; then
     chmod +x /usr/local/bin/livekit-jwt-service
     log "livekit-jwt-service установлен"
   else
-    warn "Не удалось скачать livekit-jwt-service"
+    warn "wget не сработал — собираю из исходников..."
+    rm -f /usr/local/bin/livekit-jwt-service
+    apt-get install -y -qq golang-go git 2>/dev/null || true
+    rm -rf /tmp/lkjwt
+    git clone --depth=1 https://github.com/element-hq/lk-jwt-service /tmp/lkjwt 2>/dev/null
+    if [ -d /tmp/lkjwt ]; then
+      cd /tmp/lkjwt && go build -o /usr/local/bin/livekit-jwt-service . 2>/dev/null
+      cd /root
+      rm -rf /tmp/lkjwt
+      if [ -f /usr/local/bin/livekit-jwt-service ]; then
+        chmod +x /usr/local/bin/livekit-jwt-service
+        log "livekit-jwt-service собран из исходников"
+      else
+        warn "Не удалось собрать livekit-jwt-service — звонки в Element X не будут работать"
+      fi
+    else
+      warn "Не удалось клонировать репозиторий lk-jwt-service"
+    fi
   fi
 
   cat > /etc/livekit/jwt.yaml <<EOF
@@ -757,9 +796,12 @@ EOF
 experimental_features:
   msc3266_enabled: true
   msc4143_enabled: true
+
 livekit:
   url: wss://$LIVEKIT_DOMAIN
-  jwt_service_url: https://$LIVEKIT_DOMAIN/_matrix/client/unstable/com.element.msc4143/openid/request_token
+  jwt_service_url: https://$DOMAIN/_matrix/client/unstable/com.element.msc4143/openid/request_token
+  api_key: $LIVEKIT_KEY
+  api_secret: $LIVEKIT_SECRET
 EOF
   ufw allow 7881/tcp 2>/dev/null || true
   ufw allow 50000:60000/udp 2>/dev/null || true
