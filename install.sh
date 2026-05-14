@@ -211,7 +211,7 @@ total-quota=100
 stale-nonce
 no-multicast-peers
 min-port=49152
-max-port=65535
+max-port=57000
 log-file=/var/log/turnserver.log
 EOF
 systemctl enable coturn 2>/dev/null || true
@@ -301,7 +301,7 @@ cat > /etc/livekit/livekit.yaml <<EOF
 port: 7880
 rtc:
   tcp_port: 7881
-  port_range_start: 49152
+  port_range_start: 57001
   port_range_end: 65535
   use_external_ip: true
 keys:
@@ -428,9 +428,10 @@ server {
         try_files \$uri \$uri/ /element/index.html;
     }
 
-    # lk-jwt-service — авторизация для LiveKit
-    location /livekit/jwt/ {
-        proxy_pass http://127.0.0.1:8080/;
+    # lk-jwt-service — авторизация для LiveKit (без 301 редиректов)
+    location ^~ /livekit/jwt {
+        rewrite ^/livekit/jwt/?(.*)$ /\$1 break;
+        proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
