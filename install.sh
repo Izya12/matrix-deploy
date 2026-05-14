@@ -1,7 +1,8 @@
 #!/bin/bash
 # ============================================================
-#  Matrix Synapse — минимальная установка v5.0
+#  Matrix Synapse + LiveKit  —  v0.6.0
 #  Debian 12+  •  запуск от root
+#  Статус: в разработке, не для продакшена
 # ============================================================
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -15,13 +16,14 @@ die()     { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
 [ "$EUID" -ne 0 ] && die "Запускай от root"
 
-# ── Версии ───────────────────────────────────────────────
+# ── Ссылки на скачивание ──────────────────────────────────
 ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/v1.12.18/element-v1.12.18.tar.gz"
 LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/v1.11.0/livekit_1.11.0_linux_amd64.tar.gz"
+LKJWT_URL="https://github.com/element-hq/lk-jwt-service/releases/latest/download/lk-jwt-service_linux_amd64"
 
 # ── Ввод данных ───────────────────────────────────────────
 clear
-echo -e "\n${CYAN}${BOLD}  Matrix Synapse  •  v5.0${NC}\n"
+echo -e "\n${CYAN}${BOLD}  Matrix Synapse + LiveKit  •  v0.6.0${NC}\n"
 
 read -rp "  Домен Matrix  (matrix.example.com): " DOMAIN
 [ -z "$DOMAIN" ] && die "Домен обязателен"
@@ -43,9 +45,15 @@ LIVEKIT_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48)
 ADMIN_SUFFIX=$(tr -dc '0-9' </dev/urandom | head -c4)
 ADMIN_USER="admin_${ADMIN_SUFFIX}"
 
-read -rsp "  Пароль администратора: " ADMIN_PASS; echo ""
-read -rsp "  Повтори пароль:        " ADMIN_PASS2; echo ""
-[ "$ADMIN_PASS" != "$ADMIN_PASS2" ] && die "Пароли не совпадают"
+echo ""
+info "Имя администратора: ${BOLD}${ADMIN_USER}${NC}"
+echo ""
+while true; do
+  read -rsp "  Пароль администратора: " ADMIN_PASS; echo ""
+  read -rsp "  Повтори пароль:        " ADMIN_PASS2; echo ""
+  [ "$ADMIN_PASS" = "$ADMIN_PASS2" ] && break
+  warn "Пароли не совпадают"
+done
 [ ${#ADMIN_PASS} -lt 6 ] && die "Пароль слишком короткий"
 
 echo ""
@@ -55,6 +63,22 @@ info "Администратор: @${ADMIN_USER}:${DOMAIN}"
 echo ""
 read -rp "  Всё верно? (y/n): " CONFIRM
 [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && die "Отмена"
+
+# ══════════════════════════════════════════════════════════
+#  ФАЕРВОЛ — первым делом
+# ══════════════════════════════════════════════════════════
+section "Фаервол"
+apt-get install -y -qq ufw 2>/dev/null || true
+ufw --force enable 2>/dev/null || true
+ufw allow ssh 2>/dev/null || true
+ufw allow 80/tcp 2>/dev/null || true
+ufw allow 443/tcp 2>/dev/null || true
+ufw allow 3478/tcp 2>/dev/null || true
+ufw allow 3478/udp 2>/dev/null || true
+ufw allow 7880/tcp 2>/dev/null || true
+ufw allow 7881/tcp 2>/dev/null || true
+ufw allow 49152:65535/udp 2>/dev/null || true
+log "Порты открыты"
 
 # ══════════════════════════════════════════════════════════
 #  ЗАВИСИМОСТИ
@@ -67,23 +91,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   postgresql \
   jq coturn
 log "Зависимости установлены"
-
-# ══════════════════════════════════════════════════════════
-#  UFW — открываем порты ДО certbot
-# ══════════════════════════════════════════════════════════
-section "Порты"
-if command -v ufw >/dev/null 2>&1; then
-  ufw --force enable 2>/dev/null || true
-  ufw allow ssh 2>/dev/null || true
-  ufw allow 80/tcp 2>/dev/null || true
-  ufw allow 443/tcp 2>/dev/null || true
-  ufw allow 3478/tcp 2>/dev/null || true
-  ufw allow 3478/udp 2>/dev/null || true
-  ufw allow 7880/tcp 2>/dev/null || true
-  ufw allow 7881/tcp 2>/dev/null || true
-  ufw allow 50000:60000/udp 2>/dev/null || true
-fi
-log "Порты открыты"
 
 # ══════════════════════════════════════════════════════════
 #  POSTGRESQL
@@ -99,7 +106,8 @@ else
 fi
 HAS_DB=$(su -c "psql -lqt" postgres 2>/dev/null | cut -d'|' -f1 | grep -w synapse | xargs 2>/dev/null || true)
 if [ -z "$HAS_DB" ]; then
-  su -c "createdb --encoding=UTF8 --lc-collate=C --lc-ctype=C --template=template0 --owner=synapse synapse" postgres
+  su -c "createdb --encoding=UTF8 --lc-collate=C --lc-ctype=C \
+    --template=template0 --owner=synapse synapse" postgres
 fi
 cd /root
 log "PostgreSQL готов"
@@ -117,6 +125,9 @@ https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
   apt-get update -qq
 fi
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq matrix-synapse-py3
+
+# Удаляем конфиг с пустым server_name который ставится по умолчанию
+rm -f /etc/matrix-synapse/conf.d/server_name.yaml
 
 mkdir -p /var/lib/matrix-synapse/media
 chown -R matrix-synapse:matrix-synapse /var/lib/matrix-synapse/ 2>/dev/null || true
@@ -173,16 +184,16 @@ turn_shared_secret: "$TURN_SECRET"
 turn_user_lifetime: 86400000
 turn_allow_guests: false
 
-# LiveKit звонки
+# MatrixRTC / Element X звонки
 experimental_features:
   msc3266_enabled: true
   msc4143_enabled: true
   msc3882_enabled: true
 
-livekit:
-  url: wss://$LIVEKIT_DOMAIN
-  api_key: "$LIVEKIT_KEY"
-  api_secret: "$LIVEKIT_SECRET"
+matrix_rtc:
+  transports:
+    - type: livekit
+      livekit_service_url: "https://$DOMAIN/livekit/jwt"
 EOF
 log "Synapse настроен"
 
@@ -208,7 +219,7 @@ systemctl restart coturn 2>/dev/null || true
 log "coturn настроен"
 
 # ══════════════════════════════════════════════════════════
-#  SSL — сначала открыть порты, потом certbot
+#  SSL
 # ══════════════════════════════════════════════════════════
 section "SSL"
 rm -f /etc/nginx/sites-enabled/default
@@ -216,7 +227,7 @@ cat > /etc/nginx/sites-available/matrix-tmp <<NGINX
 server {
     listen 80;
     server_name $DOMAIN $LIVEKIT_DOMAIN;
-    location / { return 200 'ok'; add_header Content-Type text/plain; }
+    root /var/www/html;
 }
 NGINX
 ln -sf /etc/nginx/sites-available/matrix-tmp /etc/nginx/sites-enabled/matrix-tmp
@@ -224,7 +235,7 @@ nginx -t && systemctl restart nginx
 
 certbot certonly --nginx -d "$DOMAIN" -d "$LIVEKIT_DOMAIN" \
   --non-interactive --agree-tos --email "$LE_EMAIL" \
-  || die "Certbot не смог получить сертификат"
+  || die "Certbot не смог получить сертификат. Домены указывают на этот сервер?"
 
 rm -f /etc/nginx/sites-enabled/matrix-tmp /etc/nginx/sites-available/matrix-tmp
 log "SSL готов"
@@ -264,9 +275,9 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════
-#  LIVEKIT
+#  LIVEKIT SERVER
 # ══════════════════════════════════════════════════════════
-section "LiveKit"
+section "LiveKit Server"
 wget --timeout=120 "$LIVEKIT_URL" -O /tmp/livekit.tar.gz
 if file /tmp/livekit.tar.gz | grep -q compressed; then
   mkdir -p /tmp/livekit-extract
@@ -290,8 +301,8 @@ cat > /etc/livekit/livekit.yaml <<EOF
 port: 7880
 rtc:
   tcp_port: 7881
-  port_range_start: 50000
-  port_range_end: 60000
+  port_range_start: 49152
+  port_range_end: 65535
   use_external_ip: true
 keys:
   $LIVEKIT_KEY: $LIVEKIT_SECRET
@@ -316,12 +327,72 @@ systemctl restart livekit 2>/dev/null || true
 log "LiveKit запущен"
 
 # ══════════════════════════════════════════════════════════
+#  LK-JWT-SERVICE
+# ══════════════════════════════════════════════════════════
+section "lk-jwt-service"
+wget --timeout=60 "$LKJWT_URL" -O /tmp/lk-jwt-service
+if file /tmp/lk-jwt-service | grep -q ELF; then
+  mv /tmp/lk-jwt-service /usr/local/bin/lk-jwt-service
+  chmod +x /usr/local/bin/lk-jwt-service
+  log "lk-jwt-service скачан"
+else
+  warn "wget отдал не бинарник — собираю из исходников..."
+  rm -f /tmp/lk-jwt-service
+  apt-get install -y -qq golang-go git 2>/dev/null || true
+  # Пробуем свежий Go если системный старый
+  if [ ! -f /usr/local/go/bin/go ]; then
+    wget -q https://go.dev/dl/go1.24.3.linux-amd64.tar.gz -O /tmp/go.tar.gz
+    tar -xzf /tmp/go.tar.gz -C /usr/local/
+    rm -f /tmp/go.tar.gz
+  fi
+  export PATH=$PATH:/usr/local/go/bin
+  rm -rf /tmp/lkjwt
+  git clone --depth=1 https://github.com/element-hq/lk-jwt-service /tmp/lkjwt 2>/dev/null
+  if [ -d /tmp/lkjwt ]; then
+    # Отключаем DisallowUnknownFields — иначе Element X не может авторизоваться
+    sed -i 's/decoder.DisallowUnknownFields()/\/\/decoder.DisallowUnknownFields()/g' /tmp/lkjwt/main.go
+    cd /tmp/lkjwt && /usr/local/go/bin/go build -o /usr/local/bin/lk-jwt-service . 2>/dev/null
+    cd /root
+    rm -rf /tmp/lkjwt
+    if [ -f /usr/local/bin/lk-jwt-service ]; then
+      log "lk-jwt-service собран из исходников"
+    else
+      warn "Не удалось собрать lk-jwt-service — звонки в Element X не будут работать"
+    fi
+  fi
+fi
+
+cat > /etc/systemd/system/lk-jwt-service.service <<EOF
+[Unit]
+Description=LiveKit JWT Service for Matrix
+After=network.target
+[Service]
+Environment="LIVEKIT_URL=wss://$LIVEKIT_DOMAIN"
+Environment="LIVEKIT_KEY=$LIVEKIT_KEY"
+Environment="LIVEKIT_SECRET=$LIVEKIT_SECRET"
+Environment="LIVEKIT_FULL_ACCESS_HOMESERVERS=$DOMAIN"
+ExecStart=/usr/local/bin/lk-jwt-service
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable lk-jwt-service 2>/dev/null || true
+systemctl restart lk-jwt-service 2>/dev/null || true
+sleep 2
+if systemctl is-active --quiet lk-jwt-service; then
+  log "lk-jwt-service запущен (порт 8080)"
+else
+  warn "lk-jwt-service не запустился — проверь: journalctl -u lk-jwt-service -n 20"
+fi
+
+# ══════════════════════════════════════════════════════════
 #  NGINX
 # ══════════════════════════════════════════════════════════
 section "Nginx"
 
-# well-known через nginx return — чище чем файл
-WELL_KNOWN_JSON="{\"m.homeserver\":{\"base_url\":\"https://$DOMAIN\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://$DOMAIN\"}]}"
+WELL_KNOWN_CLIENT="{\"m.homeserver\":{\"base_url\":\"https://$DOMAIN\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://$DOMAIN/livekit/jwt\"}]}"
 
 cat > /etc/nginx/sites-available/matrix <<NGINX
 server {
@@ -340,13 +411,12 @@ server {
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
     add_header Strict-Transport-Security "max-age=31536000" always;
 
-    # Well-known через return
+    # Well-known
     location /.well-known/matrix/client {
         default_type application/json;
         add_header Access-Control-Allow-Origin *;
-        return 200 '$WELL_KNOWN_JSON';
+        return 200 '$WELL_KNOWN_CLIENT';
     }
-
     location /.well-known/matrix/server {
         default_type application/json;
         return 200 '{"m.server":"$DOMAIN:443"}';
@@ -358,8 +428,13 @@ server {
         try_files \$uri \$uri/ /element/index.html;
     }
 
-    location = / {
-        return 301 /element/;
+    # lk-jwt-service — авторизация для LiveKit
+    location /livekit/jwt/ {
+        proxy_pass http://127.0.0.1:8080/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
     # Медиа — увеличенные таймауты
@@ -382,7 +457,6 @@ server {
         proxy_set_header Host \$host;
         client_max_body_size 50M;
     }
-
     location /_synapse/ {
         proxy_pass http://127.0.0.1:8008;
         proxy_set_header X-Forwarded-For \$remote_addr;
@@ -397,7 +471,6 @@ server {
     server_name $LIVEKIT_DOMAIN;
     return 301 https://\$host\$request_uri;
 }
-
 server {
     listen 443 ssl http2;
     server_name $LIVEKIT_DOMAIN;
@@ -470,26 +543,27 @@ chmod 600 /root/.matrix_secrets
 # ══════════════════════════════════════════════════════════
 section "Проверка"
 sleep 3
-check() {
+
+chk() {
   local label="$1" url="$2"
   if curl -sf --max-time 10 "$url" >/dev/null 2>&1; then
     log "$label"
   else
-    warn "НЕДОСТУПНО: $label"
+    warn "НЕДОСТУПНО: $label ($url)"
   fi
 }
-check "Synapse API"     "https://$DOMAIN/_matrix/client/versions"
-check "Element Web"     "https://$DOMAIN/element/"
-check "Well-known"      "https://$DOMAIN/.well-known/matrix/client"
-check "LiveKit"         "https://$LIVEKIT_DOMAIN"
+chk "Synapse API"        "https://$DOMAIN/_matrix/client/versions"
+chk "Element Web"        "https://$DOMAIN/element/"
+chk "Well-known client"  "https://$DOMAIN/.well-known/matrix/client"
+chk "lk-jwt-service"     "https://$DOMAIN/livekit/jwt/"
+chk "LiveKit server"     "https://$LIVEKIT_DOMAIN"
 
-# MSC4143
 MSC=$(curl -s http://127.0.0.1:8008/_matrix/client/versions \
   | jq -r '.unstable_features["org.matrix.msc4143"] // false' 2>/dev/null)
 if [ "$MSC" = "true" ]; then
-  log "MSC4143 (звонки) включён"
+  log "MSC4143 активен — звонки должны работать"
 else
-  warn "MSC4143 не активен — проверь конфиг Synapse"
+  warn "MSC4143 не активен — проверь homeserver.yaml"
 fi
 
 # ══════════════════════════════════════════════════════════
@@ -498,9 +572,9 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════════════╗"
-echo "  ║                      ГОТОВО!  🚀                            ║"
+echo "  ║            Matrix + LiveKit  •  v0.6.0                      ║"
 echo "  ╠══════════════════════════════════════════════════════════════╣"
-printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN"
+printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN/element/"
 printf  "  ║  LiveKit: wss://%-44s║\n" "$LIVEKIT_DOMAIN"
 echo    "  ╠══════════════════════════════════════════════════════════════╣"
 printf  "  ║  Логин:   %-49s║\n" "$ADMIN_USER"
@@ -508,7 +582,7 @@ printf  "  ║  Пароль:  %-49s║\n" "$ADMIN_PASS"
 echo    "  ╚══════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo -e "  ${YELLOW}⚠  ЗАПИШИ логин и пароль!${NC}"
-echo -e "  ${YELLOW}⚠  Секреты сохранены в /root/.matrix_secrets${NC}"
+echo -e "  ${YELLOW}⚠  Секреты: /root/.matrix_secrets${NC}"
 echo ""
 echo -e "  ${CYAN}Управление пользователями:${NC}"
 echo -e "  https://awesome-technologies.github.io/synapse-admin/"
