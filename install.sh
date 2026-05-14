@@ -1,154 +1,137 @@
 #!/bin/bash
-# ============================================================
-# Matrix Synapse "People's Edition" — v7.0 (Security & Mobile)
-# ============================================================
+# MATRIX SYNAPSE CLEAN ARCHITECTURE (NO DOCKER)
+# Version: 8.0 "Professional"
 
 set -e
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-log()     { echo -e "${GREEN}[✓]${NC} $1"; }
-section() { echo -e "\n${CYAN}━━━ $1 ━━━${NC}"; }
-err()     { echo -e "${RED}[✗]${NC} $1"; exit 1; }
+# --- Цвета и логи ---
+green="\e[32m"
+red="\e[31m"
+end="\e[0m"
+log() { echo -e "${green}[INFO]${end} $1"; }
 
-[[ "$EUID" -ne 0 ]] && err "Запускай от root"
+# --- 1. Ввод данных ---
+echo -e "${green}━━━ Сбор параметров ━━━${end}"
+read -p "Основной домен (напр. matrix.example.com): " DOMAIN
+read -p "Домен для звонков (напр. calls.example.com): " CALLS_DOMAIN
+read -p "Email для SSL (Certbot): " EMAIL
+read -p "Пароль админа Matrix: " ADMIN_PASS
+read -p "Пароль к Postgres (уже созданной базы): " DB_PASS
 
-# --- Константы ---
-SECRETS="/root/.matrix_secrets"
-CONF_DIR="/etc/matrix-synapse"
-BACKUP_DIR="/opt/matrix-backups"
-SYN_PY="/opt/venvs/matrix-synapse/bin/python"
-SYN_REG="/opt/venvs/matrix-synapse/bin/register_new_matrix_user"
+# --- 2. Установка системных пакетов ---
+log "Установка зависимостей..."
+apt update && apt install -y curl wget nginx certbot python3-certbot-nginx \
+    python3-pip python3-venv libpq-dev python3-dev build-essential pwgen ufw fail2ban
 
-# --- Меню управления ---
-show_menu() {
-    clear
-    echo -e "${CYAN}Matrix Server Control v7.0${NC}"
-    if [ -f "$SECRETS" ]; then
-        echo "1. Сделать бэкап"; echo "2. Сбросить пароль админа"
-        echo "3. Очистить кэш медиа"; echo "4. Выход"
-        read -rp "Выбор: " m_choice
-        case $m_choice in
-            1) matrix_backup ;; 2) matrix_reset_pwd ;;
-            3) matrix_purge ;; *) exit 0 ;;
-        esac
-    else
-        echo "1. Полная установка (Matrix + LiveKit + Security)"
-        echo "2. Выход"
-        read -rp "Выбор: " m_choice
-        case $m_choice in
-            1) setup_all ;; *) exit 0 ;;
-        esac
-    fi
-}
+# --- 3. Настройка LiveKit (Бинарник) ---
+log "Установка LiveKit (Бинарник)..."
+LK_VERSION="1.11.0"
+wget -q "https://github.com/livekit/livekit/releases/download/v${LK_VERSION}/livekit_${LK_VERSION}_linux_amd64.tar.gz"
+tar -xzf "livekit_${LK_VERSION}_linux_amd64.tar.gz"
+mv livekit-server /usr/local/bin/ && chmod +x /usr/local/bin/livekit-server
+rm "livekit_${LK_VERSION}_linux_amd64.tar.gz"
 
-matrix_backup() {
-    section "Бэкап"
-    DATE=$(date +%Y%m%d_%H%M); mkdir -p "$BACKUP_DIR"; cd /tmp
-    sudo -u postgres pg_dump synapse_db > "$BACKUP_DIR/db_$DATE.sql"
-    tar -czf "$BACKUP_DIR/matrix_bundle_$DATE.tar.gz" "$CONF_DIR" "$SECRETS" /etc/livekit /etc/nginx/sites-available/matrix 2>/dev/null
-    log "Архив создан в $BACKUP_DIR"; read -rp "Enter..." d; show_menu
-}
+# Ключи для связи Synapse <-> LiveKit
+LK_KEY="matrix_key"
+LK_SECRET=$(pwgen -s 32 1)
 
-matrix_reset_pwd() {
-    section "Смена пароля"
-    read -rp "Новый пароль для 'admin': " NEW_P
-    $SYN_REG -c "$CONF_DIR/homeserver.yaml" http://localhost:8008 -u admin -p "$NEW_P" -a || true
-    log "Готово"; read -rp "Enter..." d; show_menu
-}
+mkdir -p /etc/livekit
+cat > /etc/livekit/livekit.yaml <<EOF
+port: 7880
+keys:
+    $LK_KEY: $LK_SECRET
+EOF
 
-matrix_purge() {
-    section "Чистка медиа"
-    find /var/lib/matrix-synapse/media_store/remote_content -type f -atime +30 -delete 2>/dev/null || true
-    log "Кэш очищен"; read -rp "Enter..." d; show_menu
-}
+# Сервис LiveKit
+cat > /etc/systemd/system/livekit.service <<EOF
+[Unit]
+Description=LiveKit Server
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/livekit-server --config /etc/livekit/livekit.yaml
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
 
-setup_all() {
-    section "Данные"
-    read -rp "Домен (matrix.site.ru): " DOMAIN
-    read -rp "Домен звонков (calls.site.ru): " CALLS_DOMAIN
-    read -rp "Пароль админа: " ADMIN_PASS
-    read -rp "Email для SSL: " EMAIL
+# --- 4. Установка Matrix Synapse (Venv) ---
+log "Установка Synapse в venv..."
+mkdir -p /opt/venvs /var/lib/matrix-synapse/media
+python3 -m venv /opt/venvs/matrix-synapse
+/opt/venvs/matrix-synapse/bin/pip install --upgrade pip setuptools
+/opt/venvs/matrix-synapse/bin/pip install matrix-synapse[postgres]
 
-    section "Установка софта"
-    apt-get update -qq
-    apt-get install -y -qq postgresql docker.io nginx certbot python3-certbot-nginx pwgen curl jq gnupg2 ufw fail2ban
+REG_SECRET=$(pwgen -s 32 1)
+MAC_SECRET=$(pwgen -s 32 1)
 
-    section "Безопасность (Firewall & Fail2Ban)"
-    ufw allow 22/tcp; ufw allow 80/tcp; ufw allow 443/tcp
-    ufw allow 8448/tcp; ufw allow 50000:60000/udp
-    echo "y" | ufw enable
-    systemctl enable fail2ban && systemctl start fail2ban
-    log "Защита включена (22, 80, 443, 8448, 50000-60000/udp)"
-
-    section "База данных"
-    cd /tmp; PG_PASS=$(pwgen -s 24 1)
-    sudo -u postgres psql -c "CREATE USER synapse_user WITH PASSWORD '$PG_PASS';" || true
-    sudo -u postgres psql -c "CREATE DATABASE synapse_db OWNER synapse_user;" || true
-    sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE synapse_db TO synapse_user;" || true
-    echo "PG_PASS='$PG_PASS'" > "$SECRETS"; echo "DOMAIN='$DOMAIN'" >> "$SECRETS"
-
-    section "Matrix Synapse"
-    if [ ! -f /usr/share/keyrings/matrix-org-archive-keyring.gpg ]; then
-        curl -fSsL https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/matrix-org-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/matrix-org-archive-keyring.gpg] https://packages.matrix.org/debian/ $(lsb_release -cs) main" > /etc/apt/sources.list.d/matrix-org.list
-    fi
-    apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq matrix-synapse-py3
-
-    [ ! -f "$CONF_DIR/homeserver.yaml" ] && $SYN_PY -m synapse.app.homeserver --server-name "$DOMAIN" --config-path "$CONF_DIR/homeserver.yaml" --generate-config --report-stats=no
-    
-    # Настройка БД
-    sed -i '/database:/,+5d' "$CONF_DIR/homeserver.yaml"
-    cat >> "$CONF_DIR/homeserver.yaml" <<EOF
+cat > /etc/matrix-synapse/homeserver.yaml <<EOF
+server_name: "$DOMAIN"
+pid_file: /run/matrix-synapse.pid
+presence: { enabled: true }
 database:
   name: psycopg2
   args:
     user: synapse_user
-    password: $PG_PASS
+    password: "$DB_PASS"
     database: synapse_db
     host: localhost
-EOF
-    sed -i "s/enable_registration: .*/enable_registration: false/" "$CONF_DIR/homeserver.yaml"
+log_config: "/etc/matrix-synapse/log.config"
+report_stats: false
+registration_shared_secret: "$REG_SECRET"
+macaroon_secret_key: "$MAC_SECRET"
+media_store_path: "/var/lib/matrix-synapse/media"
+public_baseurl: "https://$DOMAIN/"
 
-    section "LiveKit (Звонки)"
-    LK_SEC=$(pwgen -s 32 1); mkdir -p /etc/livekit
-    cat > /etc/livekit/livekit.yaml <<EOF
-port: 7880
-keys:
-    matrix: $LK_SEC
-EOF
-    docker rm -f livekit &>/dev/null || true
-    docker run -d --name livekit --restart unless-stopped --net=host -v /etc/livekit/livekit.yaml:/livekit.yaml livekit/livekit server --config /livekit.yaml
-
-    mkdir -p "$CONF_DIR/conf.d"
-    cat > "$CONF_DIR/conf.d/livekit.yaml" <<EOF
+# Настройка звонков (MSC4143 / v3_auth)
+v3_auth_enabled: true
 experimental_features:
-  msc3266_enabled: true
+  msc3882_enabled: true
   msc4143_enabled: true
+
+# Привязка LiveKit
 livekit:
-  url: wss://$CALLS_DOMAIN
-  jwt_service_url: "https://$DOMAIN/_matrix/client/unstable/com.element.msc4143/openid/request_token"
-  api_key: "matrix"
-  api_secret: "$LK_SEC"
+  enabled: true
+  url: "https://$CALLS_DOMAIN"
+  key: "$LK_KEY"
+  secret: "$LK_SECRET"
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources: [{names: [client, federation], compress: false}]
 EOF
 
-    section "Nginx & SSL"
-    mkdir -p /var/www/element
-    wget -qO- https://github.com/element-hq/element-web/releases/download/v1.11.97/element-v1.11.97.tar.gz | tar xz -C /var/www/element --strip-components=1
-    certbot --nginx -d "$DOMAIN" -d "$CALLS_DOMAIN" --non-interactive --agree-tos -m "$EMAIL"
+if [ ! -f /etc/matrix-synapse/log.config ]; then
+    wget -qO /etc/matrix-synapse/log.config https://raw.githubusercontent.com/matrix-org/synapse/develop/res/log.config
+fi
 
-    cat > /etc/nginx/sites-available/matrix <<EOF
+# --- 5. Element-Web (Статика) ---
+log "Установка Element-Web..."
+mkdir -p /var/www/element
+wget -qO- https://github.com/element-hq/element-web/releases/download/v1.11.97/element-v1.11.97.tar.gz | tar xz -C /var/www/element --strip-components=1
+
+# --- 6. Nginx + SSL + Well-Known ---
+log "Настройка Nginx и SSL..."
+certbot --nginx -d "$DOMAIN" -d "$CALLS_DOMAIN" --non-interactive --agree-tos -m "$EMAIL"
+
+cat > /etc/nginx/sites-available/matrix <<EOF
 server {
     listen 443 ssl http2;
     server_name $DOMAIN;
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
     location / { root /var/www/element; index index.html; }
-    location /admin { return 301 https://awesome-technologies.github.io/synapse-admin/; }
+
     location /.well-known/matrix/client {
         default_type application/json;
         add_header Access-Control-Allow-Origin * always;
-        return 200 '{"m.homeserver":{"base_url":"https://$DOMAIN"},"org.matrix.msc4143.livekit":{"url":"wss://$CALLS_DOMAIN"}}';
+        return 200 '{"m.homeserver":{"base_url":"https://$DOMAIN"},"org.matrix.msc4143.rtc_foci":[{"type":"livekit","livekit_service_url":"https://$CALLS_DOMAIN"}]}';
     }
+
     location /_matrix {
         proxy_pass http://127.0.0.1:8008;
         proxy_set_header Host \$host;
@@ -161,6 +144,7 @@ server {
     server_name $CALLS_DOMAIN;
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
     location / {
         proxy_pass http://127.0.0.1:7880;
         proxy_http_version 1.1;
@@ -170,18 +154,35 @@ server {
     }
 }
 EOF
-    ln -sf /etc/nginx/sites-available/matrix /etc/nginx/sites-enabled/ || true
-    rm -f /etc/nginx/sites-enabled/default
-    systemctl restart nginx matrix-synapse
-    
-    sleep 5
-    $SYN_REG -c "$CONF_DIR/homeserver.yaml" http://localhost:8008 -u admin -p "$ADMIN_PASS" -a || true
-    
-    section "ГОТОВО"
-    echo -e "Чат:     https://$DOMAIN"
-    echo -e "Админка: https://$DOMAIN/admin"
-    echo -e "Логин:   admin / Пароль: $ADMIN_PASS"
-}
 
-show_menu
-# (пустая строка в конце для безопасности потока)
+ln -sf /etc/nginx/sites-available/matrix /etc/nginx/sites-enabled/
+
+# --- 7. Запуск ---
+log "Запуск сервисов..."
+cat > /etc/systemd/system/matrix-synapse.service <<EOF
+[Unit]
+Description=Synapse Matrix homeserver
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/matrix-synapse
+ExecStart=/opt/venvs/matrix-synapse/bin/python -m synapse.app.homeserver -c /etc/matrix-synapse/homeserver.yaml
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable livekit matrix-synapse
+systemctl restart nginx livekit matrix-synapse
+
+log "Ожидание прогрева Synapse..."
+sleep 15
+/opt/venvs/matrix-synapse/bin/register_new_matrix_user -c /etc/matrix-synapse/homeserver.yaml http://localhost:8008 -u admin -p "$ADMIN_PASS" -a || true
+
+echo -e "${green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${end}"
+echo -e " ГОТОВО! Элемент: https://$DOMAIN"
+echo -e " Звонки через LiveKit настроены напрямую в Synapse."
+echo -e " Логин: admin | Пароль: $ADMIN_PASS"
+echo -e "${green}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${end}"
