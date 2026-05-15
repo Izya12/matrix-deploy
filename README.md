@@ -26,6 +26,7 @@ Bash-скрипт для автоматического развертывани
 
 Запустите скрипт от пользователя **root**:
 
+```
 bash <(curl -fsSL https://raw.githubusercontent.com/konvasru-oss/matrix-deploy/main/install.sh)
 
 ```
