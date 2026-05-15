@@ -26,10 +26,7 @@ Bash-скрипт для автоматического развертывани
 
 Запустите скрипт от пользователя **root**:
 
-```bash
-wget https://raw.githubusercontent.com/ВАШ_АККАУНТ/РЕПОЗИТОРИЙ/main/install.sh
-chmod +x install.sh
-./install.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/konvasru-oss/matrix-deploy/main/install.sh)
 
 ```
 
