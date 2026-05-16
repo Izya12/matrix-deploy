@@ -532,6 +532,24 @@ echo ""
 read -rp "  Всё верно? (y/n): " CONFIRM
 [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ] && die "Отмена"
 
+# Определение IP для LiveKit
+section "Определение IP"
+if [ "$IP_VERSION" = "6" ]; then
+  NEW_PUBLIC_IP=$(curl -6 -s --max-time 5 https://ifconfig.me || curl -6 -s --max-time 5 https://api6.ipify.org || echo "")
+  BIND_ADDR="::"
+else
+  NEW_PUBLIC_IP=$(curl -4 -s --max-time 5 https://ifconfig.me || curl -4 -s --max-time 5 https://api.ipify.org || echo "")
+  BIND_ADDR="0.0.0.0"
+fi
+
+PUBLIC_IP=${NEW_PUBLIC_IP:-$PUBLIC_IP}
+
+if [ -z "$PUBLIC_IP" ]; then
+  warn "Не удалось определить публичный IP. LiveKit может работать некорректно."
+else
+  log "Публичный IP: $PUBLIC_IP"
+fi
+
 if [ "$MODE" = "repair" ] && [ -x /usr/local/bin/matrix-backup ]; then
   section "Бэкап перед починкой"
   mkdir -p "$BACKUP_DIR"
@@ -893,11 +911,13 @@ fi
 mkdir -p /etc/livekit
 safe_write /etc/livekit/livekit.yaml <<EOF || LK_CHANGED=1
 port: 7880
+bind_addresses: ["$BIND_ADDR"]
 rtc:
   tcp_port: 7881
   port_range_start: 57001
   port_range_end: 65535
-  use_external_ip: true
+  bind_addresses: ["$BIND_ADDR"]
+  $( [ -n "$PUBLIC_IP" ] && echo "node_ip: $PUBLIC_IP" || echo "use_external_ip: true" )
 keys:
   $LIVEKIT_KEY: $LIVEKIT_SECRET
 logging:
@@ -1170,7 +1190,8 @@ su -c "psql -d synapse -tAc \"SELECT name, admin FROM users WHERE deactivated=0 
 
 echo ""
 read -rp "Имя пользователя (anton или @anton:\$DOMAIN): " TARGET_USER
-[[ "\$TARGET_USER" != @* ]] && TARGET_USER="@\${TARGET_USER}:\$DOMAIN"
+[[ "\$TARGET_USER" != @* ]] && TARGET_USER="@\$TARGET_USER"
+[[ "\$TARGET_USER" != *:* ]] && TARGET_USER="\$TARGET_USER:\$DOMAIN"
 
 echo -e "\${BLUE}[i]\${NC} Меняем пароль для: \${BOLD}\$TARGET_USER\${NC}"
 echo ""
@@ -1518,6 +1539,8 @@ safe_write "$SECRETS_FILE" <<EOF
 DOMAIN=$DOMAIN
 LIVEKIT_DOMAIN=$LIVEKIT_DOMAIN
 IP_VERSION=$IP_VERSION
+PUBLIC_IP=$PUBLIC_IP
+BIND_ADDR=$BIND_ADDR
 ADMIN_USER=${ADMIN_USER:-}
 LE_EMAIL=$LE_EMAIL
 PG_PASS=$PG_PASS
@@ -1617,18 +1640,20 @@ echo ""
 echo -e "${GREEN}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════════════╗"
 echo "  ║            Matrix + LiveKit  •  ${SCRIPT_VERSION}                      ║"
-echo "  ╠══════════════════════════════════════════════════════════════╣"
+echo "  ╠══════��═══════════════════════════════════════════════�����══════╣"
 printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN/element/"
 printf  "  ║  Админка: https://%-42s║\n" "$DOMAIN/admin/"
 printf  "  ║  LiveKit: wss://%-44s║\n" "$LIVEKIT_DOMAIN"
 echo    "  ╠═════════════════════�����══�����══�����═══════════════════════════════╣"
 if [ "$MODE" = "install" ]; then
-printf  "  ║  Логин:   %-49s║\n" "$ADMIN_USER"
-printf  "  ║  ��ароль:  %-49s║\n" "$ADMIN_PASS"
+printf  "  ║  Логин:   %-49s║\n" "@${ADMIN_USER}:${DOMAIN}"
+printf  "  ║  Пароль:  %-49s║\n" "$ADMIN_PASS"
+printf  "  ║  HomeSrv: https://%-41s║\n" "$DOMAIN"
 else
-printf  "  ║  Админ:   %-49s║\n" "${ADMIN_USER:-?}"
+printf  "  ║  Админ:   %-49s║\n" "@${ADMIN_USER:-?}:${DOMAIN}"
+printf  "  ║  HomeSrv: https://%-41s║\n" "$DOMAIN"
 fi
-echo    "  ╚═══════���══════════════════════════════════════════════════════╝"
+echo    "  ╚════��══���══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
 if [ "$MODE" = "install" ]; then
