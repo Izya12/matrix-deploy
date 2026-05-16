@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  Matrix Synapse + LiveKit  —  v0.7.0
+#  Matrix Synapse + LiveKit  —  v0.8.0
 #  Debian 12+  •  запуск от root
 #  Меню: install / repair / passwd / backup / restore /
 #        migration_backup / migration_restore / admin_passwd
@@ -8,6 +8,7 @@
 
 set -o pipefail
 
+SCRIPT_VERSION="v0.8.0"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -28,11 +29,13 @@ case "$ARCH" in
 esac
 
 ELEMENT_VER="v1.12.18"
+SYNAPSE_ADMIN_VER="0.10.2"
 LIVEKIT_VER="1.11.0"
 LKJWT_VER="v0.1.2"
 GO_VER="1.24.3"
 
 ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/${ELEMENT_VER}/element-${ELEMENT_VER}.tar.gz"
+SYNAPSE_ADMIN_URL="https://github.com/Awesome-Technologies/synapse-admin/releases/download/${SYNAPSE_ADMIN_VER}/synapse-admin-${SYNAPSE_ADMIN_VER}.tar.gz"
 LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VER}/livekit_${LIVEKIT_VER}_linux_${ARCH_SUFFIX}.tar.gz"
 LKJWT_URL="https://github.com/element-hq/lk-jwt-service/releases/latest/download/lk-jwt-service_linux_${ARCH_SUFFIX}"
 GO_URL="https://go.dev/dl/go${GO_VER}.linux-${ARCH_SUFFIX}.tar.gz"
@@ -363,7 +366,7 @@ NGINX
 #  ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════
 clear
-echo -e "\n${CYAN}${BOLD}  Matrix Synapse + LiveKit  •  v0.7.0${NC}\n"
+echo -e "\n${CYAN}${BOLD}  Matrix Synapse + LiveKit  •  ${SCRIPT_VERSION}${NC}\n"
 echo -e "  Что хочешь сделать?\n"
 echo -e "  ${BOLD}1.${NC} Установить Matrix + LiveKit с нуля"
 echo -e "  ${BOLD}2.${NC} Починить / переустановить (данные сохраняются)"
@@ -439,7 +442,7 @@ fi
 #  INSTALL / REPAIR — ввод данных
 # ══════════════════════════════════════════════════════════
 clear
-echo -e "\n${CYAN}${BOLD}  Matrix Synapse + LiveKit  •  v0.7.0${NC}\n"
+echo -e "\n${CYAN}${BOLD}  Matrix Synapse + LiveKit  •  ${SCRIPT_VERSION}${NC}\n"
 
 if [ "$MODE" = "repair" ]; then
   INSTALLED_DOMAIN=$(get_installed_domain)
@@ -528,7 +531,7 @@ apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   curl wget gnupg lsb-release file dnsutils \
   nginx certbot python3-certbot-nginx \
-  postgresql \
+  postgresql fail2ban \
   jq coturn qrencode
 
 
@@ -665,6 +668,29 @@ EOF
 log "Synapse настроен"
 
 # ══════════════════════════════════════════════════════════
+#  FAIL2BAN
+# ══════════════════════════════════════════════════════════
+section "fail2ban"
+safe_write /etc/fail2ban/filter.d/matrix-synapse.conf <<EOF
+[Definition]
+failregex = ^<HOST> - .* - .* - \{.*\} - POST - /_matrix/client/.*/login - 40[13] - \{.*"error":"(Invalid password|Unknown user)".*\}
+ignoreregex =
+EOF
+
+safe_write /etc/fail2ban/jail.d/matrix-synapse.conf <<EOF
+[matrix-synapse]
+enabled = true
+port = 80,443,8008
+filter = matrix-synapse
+logpath = /var/log/matrix-synapse/homeserver.log
+maxretry = 5
+bantime = 3600
+EOF
+
+systemctl restart fail2ban
+log "fail2ban настроен"
+
+# ══════════════════════════════════════════════════════════
 #  COTURN
 # ══════════════════════════════════════════════════════════
 section "coturn"
@@ -779,9 +805,32 @@ EOF
 fi
 rm -f /tmp/element.tar.gz
 
-# ══════════════════════════════════════════════════════════
+# ══════════════���══�����══════��═════════════════════════════════
 #  LIVEKIT SERVER
+# ════════════════════���═══════���═════════════════════════════
 # ══════════════════════════════════════════════════════════
+#  SYNAPSE ADMIN
+# ══════════════════════════════════════════════════════════
+section "Synapse Admin"
+CURRENT_SADMIN_VER=$(cat /var/www/html/admin/version 2>/dev/null || echo "none")
+
+if [ "$SYNAPSE_ADMIN_VER" = "$CURRENT_SADMIN_VER" ] && [ -d /var/www/html/admin ]; then
+  log "Synapse Admin $SYNAPSE_ADMIN_VER уже установлен"
+else
+  download_file "$SYNAPSE_ADMIN_URL" "/tmp/synapse-admin.tar.gz" "Synapse Admin"
+  if file /tmp/synapse-admin.tar.gz | grep -q compressed; then
+    rm -rf /var/www/html/admin
+    mkdir -p /var/www/html/admin
+    tar -xzf /tmp/synapse-admin.tar.gz -C /var/www/html/admin --strip-components=1
+    echo "$SYNAPSE_ADMIN_VER" > /var/www/html/admin/version
+    chown -R www-data:www-data /var/www/html/admin
+    log "Synapse Admin распакован ($SYNAPSE_ADMIN_VER)"
+  else
+    warn "Некорректный архив Synapse Admin"
+  fi
+  rm -f /tmp/synapse-admin.tar.gz
+fi
+
 section "LiveKit Server"
 LK_VERSION=$(echo "$LIVEKIT_URL" | grep -oP '\d+\.\d+\.\d+' | head -1)
 CURRENT_LK_VER=$(/usr/local/bin/livekit-server --version 2>/dev/null | awk '{print $3}')
@@ -828,10 +877,28 @@ safe_write /etc/systemd/system/livekit.service <<EOF || LK_CHANGED=1
 [Unit]
 Description=LiveKit Server
 After=network.target
+
 [Service]
 ExecStart=/usr/local/bin/livekit-server --config /etc/livekit/livekit.yaml
 Restart=always
 RestartSec=5
+
+# Security Hardening
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -895,6 +962,7 @@ safe_write /etc/systemd/system/lk-jwt-service.service <<EOF || JWT_CHANGED=1
 [Unit]
 Description=LiveKit JWT Service for Matrix
 After=network.target
+
 [Service]
 Environment="LIVEKIT_URL=wss://$LIVEKIT_DOMAIN"
 Environment="LIVEKIT_KEY=$LIVEKIT_KEY"
@@ -903,6 +971,23 @@ Environment="LIVEKIT_FULL_ACCESS_HOMESERVERS=$DOMAIN"
 ExecStart=/usr/local/bin/lk-jwt-service
 Restart=always
 RestartSec=5
+
+# Security Hardening
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -951,6 +1036,11 @@ server {
     location /element/ {
         alias /var/www/html/element/;
         try_files \$uri \$uri/ /element/index.html;
+    }
+
+    location /admin/ {
+        alias /var/www/html/admin/;
+        try_files \$uri \$uri/ /admin/index.html;
     }
 
     location ^~ /livekit/jwt {
@@ -1310,10 +1400,20 @@ chmod +x /usr/local/bin/matrix-migration-backup
 
 safe_write /usr/local/bin/matrix-media-cleanup <<'SCRIPT'
 #!/bin/bash
-# Чистит медиа с других серверов старше 30 дней (картинки, видео)
-find /var/lib/matrix-synapse/media/remote_content -type f -mtime +30 -delete 2>/dev/null || true
-find /var/lib/matrix-synapse/media/remote_thumbnail -type f -mtime +30 -delete 2>/dev/null || true
-echo "$(date '+%Y-%m-%d %H:%M:%S'): media cleanup done" >> /var/log/matrix-media-cleanup.log
+# Чистит кэш медиа с других серверов старше 30 дней через Admin API
+TOKEN_FILE="/root/.matrix_access_token"
+if [ ! -f "$TOKEN_FILE" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S'): error: no access token found in $TOKEN_FILE" >> /var/log/matrix-media-cleanup.log
+    exit 1
+fi
+
+TOKEN=$(cat "$TOKEN_FILE")
+BEFORE_TS=$(date -d "30 days ago" +%s%3N)
+
+RESPONSE=$(curl -s -X POST "http://127.0.0.1:8008/_synapse/admin/v1/purge_media_cache?before_ts=$BEFORE_TS" \
+     -H "Authorization: Bearer $TOKEN")
+
+echo "$(date '+%Y-%m-%d %H:%M:%S'): media cleanup done. Response: $RESPONSE" >> /var/log/matrix-media-cleanup.log
 SCRIPT
 chmod +x /usr/local/bin/matrix-media-cleanup
 
@@ -1425,7 +1525,7 @@ fi
 echo ""
 echo -e "${GREEN}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════════════╗"
-echo "  ║            Matrix + LiveKit  •  v0.7.0                      ║"
+echo "  ║            Matrix + LiveKit  •  ${SCRIPT_VERSION}                      ║"
 echo "  ╠══════════════════════════════════════════════════════════════╣"
 printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN/element/"
 printf  "  ║  LiveKit: wss://%-44s║\n" "$LIVEKIT_DOMAIN"

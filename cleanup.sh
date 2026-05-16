@@ -64,7 +64,7 @@ log "coturn удалён"
 # fail2ban
 systemctl stop fail2ban 2>/dev/null || true
 apt-get remove --purge -y fail2ban 2>/dev/null || true
-rm -f /etc/fail2ban/jail.local
+rm -f /etc/fail2ban/jail.local /etc/fail2ban/jail.d/matrix-synapse.conf
 rm -f /etc/fail2ban/filter.d/matrix-synapse.conf
 log "fail2ban удалён"
 
