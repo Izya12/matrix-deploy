@@ -30,12 +30,12 @@ if command -v docker >/dev/null 2>&1; then
 fi
 
 # LiveKit
-systemctl stop livekit livekit-jwt 2>/dev/null || true
-systemctl disable livekit livekit-jwt 2>/dev/null || true
+systemctl stop livekit lk-jwt-service 2>/dev/null || true
+systemctl disable livekit lk-jwt-service 2>/dev/null || true
 rm -f /etc/systemd/system/livekit.service
-rm -f /etc/systemd/system/livekit-jwt.service
+rm -f /etc/systemd/system/lk-jwt-service.service
 rm -f /usr/local/bin/livekit-server
-rm -f /usr/local/bin/livekit-jwt-service
+rm -f /usr/local/bin/lk-jwt-service
 rm -rf /etc/livekit
 systemctl daemon-reload
 log "LiveKit удалён"
@@ -73,11 +73,11 @@ rm -f /root/.matrix_secrets /root/.matrix_pg_pass /root/.matrix_access_token /ro
 rm -rf /opt/matrix-backups
 log "Секреты и бэкапы удалены"
 
-# Команды
-rm -f /usr/local/bin/matrix-backup
-rm -f /usr/local/bin/matrix-reset-password
-rm -f /etc/cron.d/matrix-backup
+# Команды и утилиты
+rm -f /usr/local/bin/matrix-*
+rm -f /etc/cron.d/matrix-*
 rm -f /etc/cron.d/certbot-renew
+log "Утилиты и cron задачи удалены"
 
 # UFW сброс
 ufw --force reset 2>/dev/null || true

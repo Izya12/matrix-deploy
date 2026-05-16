@@ -34,6 +34,52 @@ load_secrets() {
   [ -f "$SECRETS_FILE" ] && . "$SECRETS_FILE"
 }
 
+# Безопасная запись конфига: пишет в темп, сравнивает, и только если есть отличия — заменяет (делая .bak)
+# Возвращает 0 если файл не изменился, 1 если изменён.
+safe_write() {
+  local target="$1"
+  local tmp
+  tmp=$(mktemp)
+  cat > "$tmp"
+  if [ -f "$target" ]; then
+    if diff -q "$tmp" "$target" >/dev/null; then
+      rm "$tmp"
+      return 0
+    else
+      cp "$target" "${target}.bak"
+    fi
+  fi
+  mv "$tmp" "$target"
+  return 1
+}
+
+# Безопасное скачивание с проверкой HTTP кода
+safe_download() {
+  local url="$1"
+  local output="$2"
+  local description="${3:-файла}"
+  info "Скачиваю $description..."
+  curl -L --fail --silent --show-error "$url" -o "$output" || die "Не удалось скачать $description ($url)"
+}
+
+# Проверка DNS
+check_dns() {
+  local domain="$1"
+  local public_ip
+  public_ip=$(curl -s --max-time 10 https://ifconfig.me || curl -s --max-time 10 https://api.ipify.org)
+  [ -z "$public_ip" ] && { warn "Не удалось определить публичный IP — пропускаю проверку DNS"; return 0; }
+
+  local resolved_ip
+  resolved_ip=$(host "$domain" | awk '/has address/ { print $NF; exit }')
+  
+  if [ -z "$resolved_ip" ] || [ "$resolved_ip" != "$public_ip" ]; then
+    warn "Домен $domain резолвится в ${resolved_ip:-ничего}, а должен в $public_ip."
+    read -rp "  Всё равно продолжить? (y/n): " CONTINUE_DNS
+    [[ ! "$CONTINUE_DNS" =~ ^[yY]$ ]] && die "Исправьте DNS записи для $domain"
+  fi
+  return 0
+}
+
 get_installed_domain() {
   if [ -f /etc/matrix-synapse/homeserver.yaml ]; then
     grep '^server_name:' /etc/matrix-synapse/homeserver.yaml 2>/dev/null \
@@ -170,8 +216,8 @@ do_migration_restore() {
 
   section "Synapse"
   if [ ! -f /etc/apt/sources.list.d/matrix-org.list ]; then
-    wget -qO /usr/share/keyrings/matrix-org-archive-keyring.gpg \
-      https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg
+    safe_download "https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg" \
+      "/usr/share/keyrings/matrix-org-archive-keyring.gpg" "Matrix keyring"
     echo "deb [signed-by=/usr/share/keyrings/matrix-org-archive-keyring.gpg] \
 https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
       > /etc/apt/sources.list.d/matrix-org.list
@@ -491,8 +537,8 @@ log "PostgreSQL готов"
 # ══════════════════════════════════════════════════════════
 section "Synapse"
 if [ ! -f /etc/apt/sources.list.d/matrix-org.list ]; then
-  wget -qO /usr/share/keyrings/matrix-org-archive-keyring.gpg \
-    https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg
+  safe_download "https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg" \
+    "/usr/share/keyrings/matrix-org-archive-keyring.gpg" "Matrix keyring"
   echo "deb [signed-by=/usr/share/keyrings/matrix-org-archive-keyring.gpg] \
 https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
     > /etc/apt/sources.list.d/matrix-org.list
@@ -506,7 +552,8 @@ mkdir -p /var/lib/matrix-synapse/media
 chown -R matrix-synapse:matrix-synapse /var/lib/matrix-synapse/ 2>/dev/null || true
 chmod -R 750 /var/lib/matrix-synapse/
 
-cat > /etc/matrix-synapse/homeserver.yaml <<EOF
+SYNAPSE_CHANGED=0
+safe_write /etc/matrix-synapse/homeserver.yaml <<EOF || SYNAPSE_CHANGED=1
 server_name: "$DOMAIN"
 public_baseurl: "https://$DOMAIN/"
 pid_file: "/var/run/matrix-synapse.pid"
@@ -601,7 +648,8 @@ log "Synapse настроен"
 #  COTURN
 # ══════════════════════════════════════════════════════════
 section "coturn"
-cat > /etc/turnserver.conf <<EOF
+COTURN_CHANGED=0
+safe_write /etc/turnserver.conf <<EOF || COTURN_CHANGED=1
 listening-port=3478
 fingerprint
 use-auth-secret
@@ -614,12 +662,19 @@ min-port=49152
 max-port=57000
 log-file=/var/log/turnserver.log
 EOF
-systemctl enable coturn 2>/dev/null || true
-systemctl restart coturn 2>/dev/null || true
-log "coturn настроен"
+
+if [ $COTURN_CHANGED -eq 1 ]; then
+  systemctl enable coturn 2>/dev/null || true
+  systemctl restart coturn 2>/dev/null || true
+  log "coturn настроен и перезапущен"
+else
+  systemctl enable coturn 2>/dev/null || true
+  systemctl start coturn 2>/dev/null || true
+  log "coturn без изменений"
+fi
 
 # ══════════════════════════════════════════════════════════
-#  SSL — с проверкой существующих сертификатов
+#  SSL — с проверкой существующих сертификатов и DNS
 # ══════════════════════════════════════════════════════════
 section "SSL"
 rm -f /etc/nginx/sites-enabled/default
@@ -632,6 +687,10 @@ HAS_LK_CERT=0
 if [ $HAS_MAIN_CERT -eq 1 ] && [ $HAS_LK_CERT -eq 1 ]; then
   log "Сертификаты для $DOMAIN и $LIVEKIT_DOMAIN уже есть — пропускаю"
 else
+  # Проверка DNS перед запросом SSL
+  [ $HAS_MAIN_CERT -eq 0 ] && check_dns "$DOMAIN"
+  [ $HAS_LK_CERT -eq 0 ]   && check_dns "$LIVEKIT_DOMAIN"
+
   DOMAINS_TO_REQUEST=""
   [ $HAS_MAIN_CERT -eq 0 ] && DOMAINS_TO_REQUEST="$DOMAINS_TO_REQUEST -d $DOMAIN"
   [ $HAS_LK_CERT -eq 0 ]   && DOMAINS_TO_REQUEST="$DOMAINS_TO_REQUEST -d $LIVEKIT_DOMAIN"
@@ -658,12 +717,27 @@ fi
 #  ELEMENT WEB
 # ══════════════════════════════════════════════════════════
 section "Element Web"
-wget --timeout=120 "$ELEMENT_URL" -O /tmp/element.tar.gz
-if file /tmp/element.tar.gz | grep -q compressed; then
-  rm -rf /var/www/html/element
-  mkdir -p /var/www/html/element
-  tar -xzf /tmp/element.tar.gz -C /var/www/html/element --strip-components=1
-  cat > /var/www/html/element/config.json <<EOF
+ELEMENT_VERSION=$(echo "$ELEMENT_URL" | grep -oP 'v\d+\.\d+\.\d+' | head -1)
+CURRENT_ELEMENT_VER=$(cat /var/www/html/element/version 2>/dev/null || echo "none")
+
+if [ "$ELEMENT_VERSION" = "$CURRENT_ELEMENT_VER" ] && [ -d /var/www/html/element ]; then
+  log "Element Web $ELEMENT_VERSION уже установлен"
+else
+  safe_download "$ELEMENT_URL" "/tmp/element.tar.gz" "Element Web"
+  if file /tmp/element.tar.gz | grep -q compressed; then
+    rm -rf /var/www/html/element
+    mkdir -p /var/www/html/element
+    tar -xzf /tmp/element.tar.gz -C /var/www/html/element --strip-components=1
+    echo "$ELEMENT_VERSION" > /var/www/html/element/version
+    log "Element Web распакован ($ELEMENT_VERSION)"
+  else
+    warn "Некорректный архив Element Web"
+    rm -f /tmp/element.tar.gz
+  fi
+fi
+
+if [ -d /var/www/html/element ]; then
+  safe_write /var/www/html/element/config.json <<EOF
 {
     "default_server_config": {
         "m.homeserver": {
@@ -681,37 +755,43 @@ if file /tmp/element.tar.gz | grep -q compressed; then
 }
 EOF
   chown -R www-data:www-data /var/www/html/element
-  rm -f /tmp/element.tar.gz
-  log "Element Web установлен"
-else
-  warn "Не удалось скачать Element Web"
-  rm -f /tmp/element.tar.gz
+  log "Element Web настроен"
 fi
+rm -f /tmp/element.tar.gz
 
 # ══════════════════════════════════════════════════════════
 #  LIVEKIT SERVER
 # ══════════════════════════════════════════════════════════
 section "LiveKit Server"
-wget --timeout=120 "$LIVEKIT_URL" -O /tmp/livekit.tar.gz
-if file /tmp/livekit.tar.gz | grep -q compressed; then
-  mkdir -p /tmp/livekit-extract
-  tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/
-  LK_BIN=$(find /tmp/livekit-extract -type f -executable 2>/dev/null | head -1)
-  if [ -n "$LK_BIN" ]; then
-    mv "$LK_BIN" /usr/local/bin/livekit-server
-    chmod +x /usr/local/bin/livekit-server
-    log "LiveKit бинарник установлен"
-  else
-    warn "Бинарник LiveKit не найден в архиве"
-  fi
-  rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
+LK_VERSION=$(echo "$LIVEKIT_URL" | grep -oP '\d+\.\d+\.\d+' | head -1)
+CURRENT_LK_VER=$(/usr/local/bin/livekit-server --version 2>/dev/null | awk '{print $3}')
+
+LK_CHANGED=0
+if [ "$LK_VERSION" = "$CURRENT_LK_VER" ] && [ -x /usr/local/bin/livekit-server ]; then
+  log "LiveKit Server $LK_VERSION уже установлен"
 else
-  warn "Не удалось скачать LiveKit"
-  rm -f /tmp/livekit.tar.gz
+  safe_download "$LIVEKIT_URL" "/tmp/livekit.tar.gz" "LiveKit Server"
+  if file /tmp/livekit.tar.gz | grep -q compressed; then
+    mkdir -p /tmp/livekit-extract
+    tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/
+    LK_BIN=$(find /tmp/livekit-extract -type f -executable 2>/dev/null | head -1)
+    if [ -n "$LK_BIN" ]; then
+      mv "$LK_BIN" /usr/local/bin/livekit-server
+      chmod +x /usr/local/bin/livekit-server
+      LK_CHANGED=1
+      log "LiveKit бинарник установлен ($LK_VERSION)"
+    else
+      warn "Бинарник LiveKit не найден в архиве"
+    fi
+    rm -rf /tmp/livekit-extract /tmp/livekit.tar.gz
+  else
+    warn "Некорректный архив LiveKit"
+    rm -f /tmp/livekit.tar.gz
+  fi
 fi
 
 mkdir -p /etc/livekit
-cat > /etc/livekit/livekit.yaml <<EOF
+safe_write /etc/livekit/livekit.yaml <<EOF || LK_CHANGED=1
 port: 7880
 rtc:
   tcp_port: 7881
@@ -724,7 +804,7 @@ logging:
   level: info
 EOF
 
-cat > /etc/systemd/system/livekit.service <<EOF
+safe_write /etc/systemd/system/livekit.service <<EOF || LK_CHANGED=1
 [Unit]
 Description=LiveKit Server
 After=network.target
@@ -735,47 +815,61 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable livekit 2>/dev/null || true
-systemctl restart livekit 2>/dev/null || true
-log "LiveKit запущен"
 
-# ══════════════════════════════════════════════════════════
+if [ $LK_CHANGED -eq 1 ]; then
+  systemctl daemon-reload
+  systemctl enable livekit 2>/dev/null || true
+  systemctl restart livekit 2>/dev/null || true
+  log "LiveKit запущен/перезапущен"
+else
+  systemctl enable livekit 2>/dev/null || true
+  systemctl start livekit 2>/dev/null || true
+fi
+
+# ════���═════════════════════════════════════════════════════
 #  LK-JWT-SERVICE
 # ══════════════════════════════════════════════════════════
 section "lk-jwt-service"
-wget --timeout=60 "$LKJWT_URL" -O /tmp/lk-jwt-service
-if file /tmp/lk-jwt-service | grep -q ELF; then
-  mv /tmp/lk-jwt-service /usr/local/bin/lk-jwt-service
-  chmod +x /usr/local/bin/lk-jwt-service
-  log "lk-jwt-service скачан"
+JWT_CHANGED=0
+
+if [ -x /usr/local/bin/lk-jwt-service ] && [ "$MODE" != "repair" ]; then
+  log "lk-jwt-service уже установлен"
 else
-  warn "wget отдал не бинарник — собираю из исходников..."
-  rm -f /tmp/lk-jwt-service
-  apt-get install -y -qq golang-go git 2>/dev/null || true
-  if [ ! -f /usr/local/go/bin/go ]; then
-    wget -q https://go.dev/dl/go1.24.3.linux-amd64.tar.gz -O /tmp/go.tar.gz
-    tar -xzf /tmp/go.tar.gz -C /usr/local/
-    rm -f /tmp/go.tar.gz
-  fi
-  export PATH=$PATH:/usr/local/go/bin
-  rm -rf /tmp/lkjwt
-  git clone --depth=1 https://github.com/element-hq/lk-jwt-service /tmp/lkjwt 2>/dev/null
-  if [ -d /tmp/lkjwt ]; then
-    # Отключаем DisallowUnknownFields — иначе Element X не может авторизоваться
-    sed -i 's/decoder.DisallowUnknownFields()/\/\/decoder.DisallowUnknownFields()/g' /tmp/lkjwt/main.go
-    cd /tmp/lkjwt && /usr/local/go/bin/go build -o /usr/local/bin/lk-jwt-service . 2>/dev/null
-    cd /root
+  info "Проверяю/скачиваю lk-jwt-service..."
+  curl -L --fail --silent --show-error "$LKJWT_URL" -o /tmp/lk-jwt-service || warn "Не удалось скачать бинарник lk-jwt-service"
+  if [ -f /tmp/lk-jwt-service ] && file /tmp/lk-jwt-service | grep -q ELF; then
+    mv /tmp/lk-jwt-service /usr/local/bin/lk-jwt-service
+    chmod +x /usr/local/bin/lk-jwt-service
+    JWT_CHANGED=1
+    log "lk-jwt-service установлен из бинарника"
+  else
+    warn "Бинарник lk-jwt-service не найден или не валиден — собираю из исходников..."
+    rm -f /tmp/lk-jwt-service
+    apt-get install -y -qq golang-go git 2>/dev/null || true
+    if ! command -v go >/dev/null 2>&1; then
+      safe_download "https://go.dev/dl/go1.24.3.linux-amd64.tar.gz" "/tmp/go.tar.gz" "Go"
+      tar -xzf /tmp/go.tar.gz -C /usr/local/
+      rm -f /tmp/go.tar.gz
+      export PATH=$PATH:/usr/local/go/bin
+    fi
     rm -rf /tmp/lkjwt
-    if [ -f /usr/local/bin/lk-jwt-service ]; then
-      log "lk-jwt-service собран из исходников"
-    else
-      warn "Не удалось собрать lk-jwt-service — звонки в Element X не будут работать"
+    git clone --depth=1 https://github.com/element-hq/lk-jwt-service /tmp/lkjwt 2>/dev/null
+    if [ -d /tmp/lkjwt ]; then
+      sed -i 's/decoder.DisallowUnknownFields()/\/\/decoder.DisallowUnknownFields()/g' /tmp/lkjwt/main.go
+      cd /tmp/lkjwt && go build -o /usr/local/bin/lk-jwt-service . 2>/dev/null
+      cd /root
+      rm -rf /tmp/lkjwt
+      if [ -f /usr/local/bin/lk-jwt-service ]; then
+        JWT_CHANGED=1
+        log "lk-jwt-service собран из исходников"
+      else
+        warn "Не удалось собрать lk-jwt-service"
+      fi
     fi
   fi
 fi
 
-cat > /etc/systemd/system/lk-jwt-service.service <<EOF
+safe_write /etc/systemd/system/lk-jwt-service.service <<EOF || JWT_CHANGED=1
 [Unit]
 Description=LiveKit JWT Service for Matrix
 After=network.target
@@ -790,24 +884,22 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable lk-jwt-service 2>/dev/null || true
-systemctl restart lk-jwt-service 2>/dev/null || true
-sleep 2
-if systemctl is-active --quiet lk-jwt-service; then
-  log "lk-jwt-service запущен (порт 8080)"
-else
-  warn "lk-jwt-service не запустился — проверь: journalctl -u lk-jwt-service -n 20"
-fi
 
-# ══════════════════════════════════════════════════════════
-#  NGINX
-# ══════════════════════════════════════════════════════════
+if [ $JWT_CHANGED -eq 1 ]; then
+  systemctl daemon-reload
+  systemctl enable lk-jwt-service 2>/dev/null || true
+  systemctl restart lk-jwt-service 2>/dev/null || true
+  log "lk-jwt-service запущен/перезапущен"
+else
+  systemctl enable lk-jwt-service 2>/dev/null || true
+  systemctl start lk-jwt-service 2>/dev/null || true
+fi
 section "Nginx"
 
 WELL_KNOWN_CLIENT="{\"m.homeserver\":{\"base_url\":\"https://$DOMAIN\"},\"org.matrix.msc4143.rtc_foci\":[{\"type\":\"livekit\",\"livekit_service_url\":\"https://$DOMAIN/livekit/jwt\"}]}"
 
-cat > /etc/nginx/sites-available/matrix <<NGINX
+NGINX_CHANGED=0
+safe_write /etc/nginx/sites-available/matrix <<NGINX || NGINX_CHANGED=1
 server {
     listen 80;
     server_name $DOMAIN;
@@ -899,19 +991,27 @@ server {
 }
 NGINX
 
-ln -sf /etc/nginx/sites-available/matrix /etc/nginx/sites-enabled/matrix
-rm -f /etc/nginx/sites-enabled/default
-nginx -t && systemctl reload nginx
-log "Nginx настроен"
+if [ $NGINX_CHANGED -eq 1 ]; then
+  ln -sf /etc/nginx/sites-available/matrix /etc/nginx/sites-enabled/matrix
+  rm -f /etc/nginx/sites-enabled/default
+  nginx -t && systemctl reload nginx
+  log "Nginx настроен и перезагружен"
+else
+  log "Nginx без изменений"
+fi
 
 # ══════════════════════════════════════════════════════════
 #  ЗАПУСК SYNAPSE + АДМИНИСТРАТОР
 # ══════════════════════════════════════════════════════════
 section "Запуск Synapse"
-systemctl stop matrix-synapse 2>/dev/null || true
-sleep 2
-systemctl enable matrix-synapse 2>/dev/null || true
-systemctl start matrix-synapse
+if [ $SYNAPSE_CHANGED -eq 1 ]; then
+  systemctl restart matrix-synapse
+  log "Synapse перезапущен (конфиг изменён)"
+else
+  systemctl enable matrix-synapse 2>/dev/null || true
+  systemctl start matrix-synapse
+  log "Synapse запущен (без изменений в конфиге)"
+fi
 
 log "Жду Synapse (до 90 сек)..."
 for i in $(seq 1 45); do
@@ -934,7 +1034,7 @@ if [ "$MODE" = "install" ]; then
     || warn "Пользователь уже существует"
 fi
 
-cat > "$SECRETS_FILE" <<EOF
+safe_write "$SECRETS_FILE" <<EOF
 DOMAIN=$DOMAIN
 LIVEKIT_DOMAIN=$LIVEKIT_DOMAIN
 ADMIN_USER=${ADMIN_USER:-}
@@ -969,7 +1069,7 @@ fi
 # ══════════════════════════════════════════════════════════
 section "Утилиты"
 
-cat > /usr/local/bin/matrix-reset-password <<SCRIPT
+safe_write /usr/local/bin/matrix-reset-password <<SCRIPT
 #!/bin/bash
 set -e
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
@@ -1012,7 +1112,7 @@ echo -e "\${GREEN}[✓]\${NC} Пароль изменён, все сессии �
 SCRIPT
 chmod +x /usr/local/bin/matrix-reset-password
 
-cat > /usr/local/bin/matrix-admin-reset-password <<SCRIPT
+safe_write /usr/local/bin/matrix-admin-reset-password <<SCRIPT
 #!/bin/bash
 set -e
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
@@ -1064,7 +1164,7 @@ echo -e "\${GREEN}[✓]\${NC} Все его сессии завершены"
 SCRIPT
 chmod +x /usr/local/bin/matrix-admin-reset-password
 
-cat > /usr/local/bin/matrix-backup <<'SCRIPT'
+safe_write /usr/local/bin/matrix-backup <<'SCRIPT'
 #!/bin/bash
 set -e
 BACKUP_DIR="/opt/matrix-backups"
@@ -1103,7 +1203,7 @@ ls -t "$BACKUP_DIR"/matrix-*.tar.gz 2>/dev/null | tail -n +$((BACKUP_KEEP+1)) | 
 SCRIPT
 chmod +x /usr/local/bin/matrix-backup
 
-cat > /usr/local/bin/matrix-migration-backup <<'SCRIPT'
+safe_write /usr/local/bin/matrix-migration-backup <<'SCRIPT'
 #!/bin/bash
 set -e
 MIGRATION_DIR="/opt/matrix-migration"
@@ -1183,7 +1283,7 @@ echo "  4. Укажи путь к архиву"
 SCRIPT
 chmod +x /usr/local/bin/matrix-migration-backup
 
-cat > /usr/local/bin/matrix-media-cleanup <<'SCRIPT'
+safe_write /usr/local/bin/matrix-media-cleanup <<'SCRIPT'
 #!/bin/bash
 # Чистит медиа с других серверов старше 30 дней (картинки, видео)
 find /var/lib/matrix-synapse/media/remote_content -type f -mtime +30 -delete 2>/dev/null || true
@@ -1192,7 +1292,7 @@ echo "$(date '+%Y-%m-%d %H:%M:%S'): media cleanup done" >> /var/log/matrix-media
 SCRIPT
 chmod +x /usr/local/bin/matrix-media-cleanup
 
-cat > /usr/local/bin/matrix-add-federation <<'SCRIPT'
+safe_write /usr/local/bin/matrix-add-federation <<'SCRIPT'
 #!/bin/bash
 set -e
 [ -z "$1" ] && { echo "Использование: matrix-add-federation домен"; exit 1; }
@@ -1216,7 +1316,7 @@ echo "Домен $FEDOMAIN добавлен в federation whitelist"
 SCRIPT
 chmod +x /usr/local/bin/matrix-add-federation
 
-cat > /usr/local/bin/matrix-remove-federation <<'SCRIPT'
+safe_write /usr/local/bin/matrix-remove-federation <<'SCRIPT'
 #!/bin/bash
 set -e
 [ -z "$1" ] && { echo "Использование: matrix-remove-federation домен"; exit 1; }
@@ -1239,14 +1339,20 @@ log "Утилиты установлены"
 section "Cron задачи"
 
 # Медиа cleanup — 1-го числа в 04:00
-echo "0 4 1 * * root /usr/local/bin/matrix-media-cleanup" > /etc/cron.d/matrix-media-cleanup
+safe_write /etc/cron.d/matrix-media-cleanup <<EOF
+0 4 1 * * root /usr/local/bin/matrix-media-cleanup
+EOF
 
 # Ежедневный бэкап — 02:00, без медиа
-echo "0 2 * * * root /usr/local/bin/matrix-backup no >> /var/log/matrix-backup.log 2>&1" > /etc/cron.d/matrix-backup
+safe_write /etc/cron.d/matrix-backup <<EOF
+0 2 * * * root /usr/local/bin/matrix-backup no >> /var/log/matrix-backup.log 2>&1
+EOF
 
 # Certbot renewal
 if ! systemctl is-active --quiet certbot.timer 2>/dev/null; then
-  echo "0 3 * * * root certbot renew --quiet --nginx" > /etc/cron.d/certbot-renew
+  safe_write /etc/cron.d/certbot-renew <<EOF
+0 3 * * * root certbot renew --quiet --nginx
+EOF
 fi
 
 mkdir -p "$BACKUP_DIR" "$MIGRATION_DIR"
