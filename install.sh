@@ -56,18 +56,24 @@ load_secrets() {
 # Возвращает 0 если файл не изменился, 1 если изменён.
 safe_write() {
   local target="$1"
+  local mode="${2:-644}"
+  local owner="${3:-root:root}"
   local tmp
   tmp=$(mktemp)
   cat > "$tmp"
   if [ -f "$target" ]; then
     if diff -q "$tmp" "$target" >/dev/null; then
       rm "$tmp"
+      chmod "$mode" "$target"
+      chown "$owner" "$target"
       return 0
     else
       cp "$target" "${target}.bak"
     fi
   fi
   mv "$tmp" "$target"
+  chmod "$mode" "$target"
+  chown "$owner" "$target"
   return 1
 }
 
@@ -339,7 +345,6 @@ NGINX
   [ -d "$TMP/cron" ] && cp -a "$TMP/cron/." /etc/cron.d/
   [ -d "$TMP/utilities" ] && {
     cp -a "$TMP/utilities/." /usr/local/bin/
-    chmod +x /usr/local/bin/matrix-* 2>/dev/null || true
   }
 
   section "Запуск сервисов"
@@ -602,7 +607,7 @@ chown -R matrix-synapse:matrix-synapse /var/lib/matrix-synapse/ 2>/dev/null || t
 chmod -R 750 /var/lib/matrix-synapse/
 
 SYNAPSE_CHANGED=0
-safe_write /etc/matrix-synapse/homeserver.yaml <<EOF || SYNAPSE_CHANGED=1
+safe_write /etc/matrix-synapse/homeserver.yaml 640 root:matrix-synapse <<EOF || SYNAPSE_CHANGED=1
 server_name: "$DOMAIN"
 public_baseurl: "https://$DOMAIN/"
 pid_file: "/var/run/matrix-synapse.pid"
@@ -779,7 +784,7 @@ NGINX
 
   certbot certonly --nginx $DOMAINS_TO_REQUEST \
     --non-interactive --agree-tos --email "$LE_EMAIL" \
-    || die "Certbot не смог получить се��тификат. Домены указыв��ют на этот сервер?"
+    || die "Certbot не смог получить се����тификат. Домены указыв��ют на этот сервер?"
 
   rm -f /etc/nginx/sites-enabled/matrix-tmp /etc/nginx/sites-available/matrix-tmp
   log "SSL готов"
@@ -1040,7 +1045,8 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name $DOMAIN;
 
     ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
@@ -1110,7 +1116,8 @@ server {
     return 301 https://\$host\$request_uri;
 }
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name $LIVEKIT_DOMAIN;
 
     ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
@@ -1138,80 +1145,13 @@ else
   log "Nginx без изменений"
 fi
 
-# ══════════════════════════════════════════════════════════
-#  ЗАПУСК SYNAPSE + АДМИНИСТРАТОР
-# ══════════════════════════════════════════════════════════
-section "Запуск Synapse"
-if [ $SYNAPSE_CHANGED -eq 1 ]; then
-  systemctl restart matrix-synapse
-  log "Synapse перезапущен (конфиг изменён)"
-else
-  systemctl enable matrix-synapse 2>/dev/null || true
-  systemctl start matrix-synapse
-  log "Synapse запущен (без изменений в конфиге)"
-fi
-
-log "Жду Synapse (до 90 сек)..."
-for i in $(seq 1 45); do
-  curl -sf http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && break
-  echo -n "."
-  sleep 2
-done
-echo ""
-curl -sf http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 \
-  || die "Synapse не поднялся. Смотри: journalctl -u matrix-synapse -n 50"
-log "Synapse запущен"
-
-if [ "$MODE" = "install" ]; then
-  section "Администратор"
-  register_new_matrix_user \
-    -c /etc/matrix-synapse/homeserver.yaml \
-    -u "$ADMIN_USER" -p "$ADMIN_PASS" -a \
-    http://127.0.0.1:8008 2>/dev/null \
-    && log "Администратор @${ADMIN_USER}:${DOMAIN} создан" \
-    || warn "Пользователь уже существует"
-fi
-
-safe_write "$SECRETS_FILE" <<EOF
-DOMAIN=$DOMAIN
-LIVEKIT_DOMAIN=$LIVEKIT_DOMAIN
-IP_VERSION=$IP_VERSION
-ADMIN_USER=${ADMIN_USER:-}
-LE_EMAIL=$LE_EMAIL
-PG_PASS=$PG_PASS
-REGISTRATION_SECRET=$REGISTRATION_SECRET
-MACAROON_SECRET=$MACAROON_SECRET
-TURN_SECRET=$TURN_SECRET
-LIVEKIT_KEY=$LIVEKIT_KEY
-LIVEKIT_SECRET=$LIVEKIT_SECRET
-INSTALLED_ELEMENT_VER=$ELEMENT_VER
-INSTALLED_LIVEKIT_VER=$LIVEKIT_VER
-INSTALLED_LKJWT_VER=$LKJWT_VER
-EOF
-chmod 600 "$SECRETS_FILE"
-
-# Регенерация user directory — чтобы поиск работал сразу
-if [ "$MODE" = "install" ] && [ -n "$ADMIN_PASS" ]; then
-  sleep 3
-  ACCESS_TOKEN=$(get_admin_token "$ADMIN_USER" "$ADMIN_PASS")
-  if [ -n "$ACCESS_TOKEN" ]; then
-    curl -s -X POST "http://127.0.0.1:8008/_synapse/admin/v1/background_updates/start_job" \
-      -H "Authorization: Bearer $ACCESS_TOKEN" \
-      -H "Content-Type: application/json" \
-      -d '{"job_name":"regenerate_directory"}' >/dev/null 2>&1 \
-      && log "User directory регенерируется — поиск заработает через несколько секунд" \
-      || warn "Не удалось запустить регенерацию user directory"
-    echo "$ACCESS_TOKEN" > /root/.matrix_access_token
-    chmod 600 /root/.matrix_access_token
-  fi
-fi
 
 # ══════════════════════════════════════════════════════════
 #  УТИЛИТЫ В /usr/local/bin
 # ══════════════════════════════════════════════════════════
 section "Утилиты"
 
-safe_write /usr/local/bin/matrix-reset-password <<SCRIPT
+safe_write /usr/local/bin/matrix-reset-password 755 <<SCRIPT
 #!/bin/bash
 set -e
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
@@ -1252,9 +1192,8 @@ su -c "psql -d synapse -c \"DELETE FROM access_tokens WHERE user_id='\$TARGET_US
 
 echo -e "\${GREEN}[✓]\${NC} Пароль изменён, все сессии завершены"
 SCRIPT
-chmod +x /usr/local/bin/matrix-reset-password
 
-safe_write /usr/local/bin/matrix-admin-reset-password <<SCRIPT
+safe_write /usr/local/bin/matrix-admin-reset-password 755 <<SCRIPT
 #!/bin/bash
 set -e
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
@@ -1304,9 +1243,8 @@ su -c "psql -d synapse -c \"DELETE FROM access_tokens WHERE user_id='\$TARGET';\
 echo -e "\${GREEN}[✓]\${NC} Пароль администратора \$TARGET изменён"
 echo -e "\${GREEN}[✓]\${NC} Все его сессии завершены"
 SCRIPT
-chmod +x /usr/local/bin/matrix-admin-reset-password
 
-safe_write /usr/local/bin/matrix-backup <<'SCRIPT'
+safe_write /usr/local/bin/matrix-backup 755 <<'SCRIPT'
 #!/bin/bash
 set -e
 BACKUP_DIR="/opt/matrix-backups"
@@ -1343,9 +1281,8 @@ echo -e "${GREEN}[✓]${NC} $OUT ($SIZE)"
 
 ls -t "$BACKUP_DIR"/matrix-*.tar.gz 2>/dev/null | tail -n +$((BACKUP_KEEP+1)) | xargs rm -f 2>/dev/null || true
 SCRIPT
-chmod +x /usr/local/bin/matrix-backup
 
-safe_write /usr/local/bin/matrix-migration-backup <<'SCRIPT'
+safe_write /usr/local/bin/matrix-migration-backup 755 <<'SCRIPT'
 #!/bin/bash
 set -e
 MIGRATION_DIR="/opt/matrix-migration"
@@ -1423,9 +1360,8 @@ echo "  2. На новом сервере направь DNS этих домен
 echo "  3. Запусти install.sh → пункт 7 (Восстановление с другого сервера)"
 echo "  4. Укажи путь к архиву"
 SCRIPT
-chmod +x /usr/local/bin/matrix-migration-backup
 
-safe_write /usr/local/bin/matrix-media-cleanup <<'SCRIPT'
+safe_write /usr/local/bin/matrix-media-cleanup 755 <<'SCRIPT'
 #!/bin/bash
 # Чистит кэш медиа с других серверов старше 30 дней через Admin API
 TOKEN_FILE="/root/.matrix_access_token"
@@ -1442,9 +1378,8 @@ RESPONSE=$(curl -s -X POST "http://127.0.0.1:8008/_synapse/admin/v1/purge_media_
 
 echo "$(date '+%Y-%m-%d %H:%M:%S'): media cleanup done. Response: $RESPONSE" >> /var/log/matrix-media-cleanup.log
 SCRIPT
-chmod +x /usr/local/bin/matrix-media-cleanup
 
-safe_write /usr/local/bin/matrix-add-federation <<'SCRIPT'
+safe_write /usr/local/bin/matrix-add-federation 755 <<'SCRIPT'
 #!/bin/bash
 set -e
 [ -z "$1" ] && { echo "Использование: matrix-add-federation домен"; exit 1; }
@@ -1466,9 +1401,8 @@ sed -i "/^federation_domain_whitelist:[[:space:]]*$/a\\  - $FEDOMAIN" "$CONFIG"
 systemctl restart matrix-synapse
 echo "Домен $FEDOMAIN добавлен в federation whitelist"
 SCRIPT
-chmod +x /usr/local/bin/matrix-add-federation
 
-safe_write /usr/local/bin/matrix-remove-federation <<'SCRIPT'
+safe_write /usr/local/bin/matrix-remove-federation 755 <<'SCRIPT'
 #!/bin/bash
 set -e
 [ -z "$1" ] && { echo "Использование: matrix-remove-federation домен"; exit 1; }
@@ -1481,9 +1415,8 @@ sed -i "/^[[:space:]]*-[[:space:]]\+${ESC}[[:space:]]*$/d" "$CONFIG"
 systemctl restart matrix-synapse
 echo "Домен $FEDOMAIN удалён из federation whitelist"
 SCRIPT
-chmod +x /usr/local/bin/matrix-remove-federation
 
-safe_write /usr/local/bin/matrix-status <<'SCRIPT'
+safe_write /usr/local/bin/matrix-status 755 <<'SCRIPT'
 #!/bin/bash
 [ "$EUID" -ne 0 ] && { echo "Запускай от root"; exit 1; }
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
@@ -1544,9 +1477,77 @@ df -h / | awk 'NR==2 { printf "  Корень: %s используется из 
 
 echo ""
 SCRIPT
-chmod +x /usr/local/bin/matrix-status
 
 log "Утилиты установлены"
+# ══════════════════════════════════════════════════════════
+#  ЗАПУСК SYNAPSE + АДМИНИСТРАТОР
+# ══════════════════════════════════════════════════════════
+section "Запуск Synapse"
+
+if [ $SYNAPSE_CHANGED -eq 1 ]; then
+  systemctl restart matrix-synapse
+  log "Synapse перезапущен (конфиг изменён)"
+else
+  systemctl enable matrix-synapse 2>/dev/null || true
+  systemctl start matrix-synapse
+  log "Synapse запущен (без изменений в конфиге)"
+fi
+
+log "Жду Synapse (до 90 сек)..."
+for i in $(seq 1 45); do
+  curl -sf http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && break
+  echo -n "."
+  sleep 2
+done
+echo ""
+curl -sf http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 \
+  || die "Synapse не поднялся. Смотри: journalctl -u matrix-synapse -n 50"
+log "Synapse запущен"
+
+if [ "$MODE" = "install" ]; then
+  section "Администратор"
+  register_new_matrix_user \
+    -c /etc/matrix-synapse/homeserver.yaml \
+    -u "$ADMIN_USER" -p "$ADMIN_PASS" -a \
+    http://127.0.0.1:8008 2>/dev/null \
+    && log "Администратор @${ADMIN_USER}:${DOMAIN} создан" \
+    || warn "Пользователь уже существует"
+fi
+
+safe_write "$SECRETS_FILE" <<EOF
+DOMAIN=$DOMAIN
+LIVEKIT_DOMAIN=$LIVEKIT_DOMAIN
+IP_VERSION=$IP_VERSION
+ADMIN_USER=${ADMIN_USER:-}
+LE_EMAIL=$LE_EMAIL
+PG_PASS=$PG_PASS
+REGISTRATION_SECRET=$REGISTRATION_SECRET
+MACAROON_SECRET=$MACAROON_SECRET
+TURN_SECRET=$TURN_SECRET
+LIVEKIT_KEY=$LIVEKIT_KEY
+LIVEKIT_SECRET=$LIVEKIT_SECRET
+INSTALLED_ELEMENT_VER=$ELEMENT_VER
+INSTALLED_LIVEKIT_VER=$LIVEKIT_VER
+INSTALLED_LKJWT_VER=$LKJWT_VER
+EOF
+chmod 600 "$SECRETS_FILE"
+
+# Регенерация user directory — чтобы поиск работал сразу
+if [ "$MODE" = "install" ] && [ -n "$ADMIN_PASS" ]; then
+  sleep 3
+  ACCESS_TOKEN=$(get_admin_token "$ADMIN_USER" "$ADMIN_PASS")
+  if [ -n "$ACCESS_TOKEN" ]; then
+    curl -s -X POST "http://127.0.0.1:8008/_synapse/admin/v1/background_updates/start_job" \
+      -H "Authorization: Bearer $ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"job_name":"regenerate_directory"}' >/dev/null 2>&1 \
+      && log "User directory регенерируется — поиск заработает через несколько секунд" \
+      || warn "Не удалось запустить регенерацию user directory"
+    echo "$ACCESS_TOKEN" > /root/.matrix_access_token
+    chmod 600 /root/.matrix_access_token
+  fi
+fi
+
 
 # ══════════════════════════════════════════════════════════
 #  CRON ЗАДАЧИ
@@ -1620,14 +1621,14 @@ echo "  ╠═══════════════════════
 printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN/element/"
 printf  "  ║  Админка: https://%-42s║\n" "$DOMAIN/admin/"
 printf  "  ║  LiveKit: wss://%-44s║\n" "$LIVEKIT_DOMAIN"
-echo    "  ╠══════════════════════════════════════════════════════════════╣"
+echo    "  ╠═════════════════════�����══�����══�����═══════════════════════════════╣"
 if [ "$MODE" = "install" ]; then
 printf  "  ║  Логин:   %-49s║\n" "$ADMIN_USER"
-printf  "  ║  Пароль:  %-49s║\n" "$ADMIN_PASS"
+printf  "  ║  ��ароль:  %-49s║\n" "$ADMIN_PASS"
 else
 printf  "  ║  Админ:   %-49s║\n" "${ADMIN_USER:-?}"
 fi
-echo    "  ╚══════════════════════════════════════════════════════════════╝"
+echo    "  ╚═══════���══════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
 if [ "$MODE" = "install" ]; then
