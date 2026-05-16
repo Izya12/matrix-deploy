@@ -86,15 +86,22 @@ download_file() {
 # Проверка DNS
 check_dns() {
   local domain="$1"
+  local ip_version="${IP_VERSION:-4}"
   local public_ip
-  public_ip=$(curl -s --max-time 10 https://ifconfig.me || curl -s --max-time 10 https://api.ipify.org)
-  [ -z "$public_ip" ] && { warn "Не удалось определить публичный IP — пропускаю проверку DNS"; return 0; }
-
   local resolved_ip
-  resolved_ip=$(host "$domain" | awk '/has address/ { print $NF; exit }')
-  
+
+  if [ "$ip_version" = "6" ]; then
+    public_ip=$(curl -s -6 --max-time 10 https://ifconfig.me || curl -s -6 --max-time 10 https://api.ipify.org)
+    [ -z "$public_ip" ] && { warn "Не удалось определить публичный IPv6 — пропускаю проверку DNS"; return 0; }
+    resolved_ip=$(host -t AAAA "$domain" | awk '/has IPv6 address/ { print $NF; exit }')
+  else
+    public_ip=$(curl -s -4 --max-time 10 https://ifconfig.me || curl -s -4 --max-time 10 https://api.ipify.org)
+    [ -z "$public_ip" ] && { warn "Не удалось определить публичный IPv4 — пропускаю проверку DNS"; return 0; }
+    resolved_ip=$(host -t A "$domain" | awk '/has address/ { print $NF; exit }')
+  fi
+
   if [ -z "$resolved_ip" ] || [ "$resolved_ip" != "$public_ip" ]; then
-    warn "Домен $domain резолвится в ${resolved_ip:-ничего}, а должен в $public_ip."
+    warn "Домен $domain резолвится в ${resolved_ip:-ничего}, а должен в $public_ip (IPv$ip_version)."
     read -rp "  Всё равно продолжить? (y/n): " CONTINUE_DNS
     [[ ! "$CONTINUE_DNS" =~ ^[yY]$ ]] && die "Исправьте DNS записи для $domain"
   fi
@@ -475,6 +482,15 @@ else
   read -rp "  Email для SSL: " LE_EMAIL
 fi
 
+if [ -z "$IP_VERSION" ]; then
+  while true; do
+    read -rp "  Версия IP (4/6, по умолчанию 4): " IP_V
+    IP_V=${IP_V:-4}
+    [[ "$IP_V" =~ ^[46]$ ]] && { IP_VERSION=$IP_V; break; }
+    warn "Введите 4 или 6"
+  done
+fi
+
 [ -z "$DOMAIN" ]         && die "Домен Matrix обязателен"
 [ -z "$LIVEKIT_DOMAIN" ] && die "Домен LiveKit обязателен"
 [ -z "$LE_EMAIL" ]       && die "Email обязателен"
@@ -504,6 +520,7 @@ fi
 echo ""
 info "Домен Matrix:  $DOMAIN"
 info "Домен LiveKit: $LIVEKIT_DOMAIN"
+info "Версия IP:     IPv$IP_VERSION"
 [ "$MODE" = "install" ] && info "Администратор: @${ADMIN_USER}:${DOMAIN}"
 [ "$MODE" = "repair" ]  && info "Режим:         починка существующей установки"
 echo ""
@@ -762,13 +779,13 @@ NGINX
 
   certbot certonly --nginx $DOMAINS_TO_REQUEST \
     --non-interactive --agree-tos --email "$LE_EMAIL" \
-    || die "Certbot не смог получить сертификат. Домены указывают на этот сервер?"
+    || die "Certbot не смог получить се��тификат. Домены указыв��ют на этот сервер?"
 
   rm -f /etc/nginx/sites-enabled/matrix-tmp /etc/nginx/sites-available/matrix-tmp
   log "SSL готов"
 fi
 
-# ══════════════════════════════════════════════════════════
+# ═════════════════════════════════��════════════════════════
 #  ELEMENT WEB
 # ══════════════════════════════════════════════════════════
 section "Element Web"
@@ -1158,6 +1175,7 @@ fi
 safe_write "$SECRETS_FILE" <<EOF
 DOMAIN=$DOMAIN
 LIVEKIT_DOMAIN=$LIVEKIT_DOMAIN
+IP_VERSION=$IP_VERSION
 ADMIN_USER=${ADMIN_USER:-}
 LE_EMAIL=$LE_EMAIL
 PG_PASS=$PG_PASS
@@ -1621,7 +1639,7 @@ echo -e "  ${YELLOW}⚠  Media wipe: 1 числа в 04:00 (remote медиа >3
 echo ""
 
 echo -e "  ${CYAN}Команды:${NC}"
-echo -e "    matrix-status                 — проверить состояние сервисов"
+echo -e "    matrix-status                 — ��роверить состояние сервисов"
 echo -e "    matrix-reset-password         — сменить пароль пользователя"
 echo -e "    matrix-admin-reset-password   — сбросить пароль адм��нистратора"
 echo -e "    matrix-backup [yes]           — обычный бэкап (yes = с медиа)"
