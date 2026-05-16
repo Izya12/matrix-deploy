@@ -6,6 +6,8 @@
 #        migration_backup / migration_restore / admin_passwd
 # ============================================================
 
+set -o pipefail
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -17,10 +19,23 @@ die()     { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
 [ "$EUID" -ne 0 ] && die "Запускай от root"
 
-# ── Ссылки на скачивание (зафиксированные версии) ─────────
-ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/v1.12.18/element-v1.12.18.tar.gz"
-LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/v1.11.0/livekit_1.11.0_linux_amd64.tar.gz"
-LKJWT_URL="https://github.com/element-hq/lk-jwt-service/releases/latest/download/lk-jwt-service_linux_amd64"
+# ── Архитектура и Версии ─────────
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  ARCH_SUFFIX="amd64" ;;
+  aarch64) ARCH_SUFFIX="arm64" ;;
+  *)       ARCH_SUFFIX="amd64" ;;
+esac
+
+ELEMENT_VER="v1.12.18"
+LIVEKIT_VER="1.11.0"
+LKJWT_VER="v0.1.2"
+GO_VER="1.24.3"
+
+ELEMENT_URL="https://github.com/element-hq/element-web/releases/download/${ELEMENT_VER}/element-${ELEMENT_VER}.tar.gz"
+LIVEKIT_URL="https://github.com/livekit/livekit/releases/download/v${LIVEKIT_VER}/livekit_${LIVEKIT_VER}_linux_${ARCH_SUFFIX}.tar.gz"
+LKJWT_URL="https://github.com/element-hq/lk-jwt-service/releases/latest/download/lk-jwt-service_linux_${ARCH_SUFFIX}"
+GO_URL="https://go.dev/dl/go${GO_VER}.linux-${ARCH_SUFFIX}.tar.gz"
 
 SECRETS_FILE="/root/.matrix_secrets"
 BACKUP_DIR="/opt/matrix-backups"
@@ -53,13 +68,16 @@ safe_write() {
   return 1
 }
 
-# Безопасное скачивание с проверкой HTTP кода
-safe_download() {
+# Безопасное скачивание с проверкой HTTP кода и целостности
+download_file() {
   local url="$1"
   local output="$2"
   local description="${3:-файла}"
   info "Скачиваю $description..."
   curl -L --fail --silent --show-error "$url" -o "$output" || die "Не удалось скачать $description ($url)"
+  if [ ! -s "$output" ]; then
+    die "Скачанный файл $description пуст"
+  fi
 }
 
 # Проверка DNS
@@ -211,12 +229,12 @@ do_migration_restore() {
   section "Зависимости"
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     nginx certbot python3-certbot-nginx postgresql \
-    jq coturn qrencode file
+    jq coturn qrencode file dnsutils
   log "Установлены"
 
   section "Synapse"
   if [ ! -f /etc/apt/sources.list.d/matrix-org.list ]; then
-    safe_download "https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg" \
+    download_file "https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg" \
       "/usr/share/keyrings/matrix-org-archive-keyring.gpg" "Matrix keyring"
     echo "deb [signed-by=/usr/share/keyrings/matrix-org-archive-keyring.gpg] \
 https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
@@ -373,6 +391,8 @@ esac
 # ══════════════════════════════════════════════════════════
 #  РАННИЕ ВЫХОДЫ
 # ══════════════════════════════════════════════════════════
+load_secrets
+
 if [ "$MODE" = "passwd" ]; then
   [ -x /usr/local/bin/matrix-reset-password ] \
     || die "Утилита не установлена — сначала установи Matrix (пункт 1)"
@@ -506,11 +526,11 @@ log "Порты открыты"
 section "Зависимости"
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  curl wget gnupg lsb-release file \
+  curl wget gnupg lsb-release file dnsutils \
   nginx certbot python3-certbot-nginx \
   postgresql \
   jq coturn qrencode
-log "Зависимости установлены"
+
 
 # ══════════════════════════════════════════════════════════
 #  POSTGRESQL
@@ -537,7 +557,7 @@ log "PostgreSQL готов"
 # ══════════════════════════════════════════════════════════
 section "Synapse"
 if [ ! -f /etc/apt/sources.list.d/matrix-org.list ]; then
-  safe_download "https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg" \
+  download_file "https://packages.matrix.org/debian/matrix-org-archive-keyring.gpg" \
     "/usr/share/keyrings/matrix-org-archive-keyring.gpg" "Matrix keyring"
   echo "deb [signed-by=/usr/share/keyrings/matrix-org-archive-keyring.gpg] \
 https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
@@ -723,7 +743,7 @@ CURRENT_ELEMENT_VER=$(cat /var/www/html/element/version 2>/dev/null || echo "non
 if [ "$ELEMENT_VERSION" = "$CURRENT_ELEMENT_VER" ] && [ -d /var/www/html/element ]; then
   log "Element Web $ELEMENT_VERSION уже установлен"
 else
-  safe_download "$ELEMENT_URL" "/tmp/element.tar.gz" "Element Web"
+  download_file "$ELEMENT_URL" "/tmp/element.tar.gz" "Element Web"
   if file /tmp/element.tar.gz | grep -q compressed; then
     rm -rf /var/www/html/element
     mkdir -p /var/www/html/element
@@ -770,7 +790,7 @@ LK_CHANGED=0
 if [ "$LK_VERSION" = "$CURRENT_LK_VER" ] && [ -x /usr/local/bin/livekit-server ]; then
   log "LiveKit Server $LK_VERSION уже установлен"
 else
-  safe_download "$LIVEKIT_URL" "/tmp/livekit.tar.gz" "LiveKit Server"
+  download_file "$LIVEKIT_URL" "/tmp/livekit.tar.gz" "LiveKit Server"
   if file /tmp/livekit.tar.gz | grep -q compressed; then
     mkdir -p /tmp/livekit-extract
     tar -xzf /tmp/livekit.tar.gz -C /tmp/livekit-extract/
@@ -832,8 +852,10 @@ fi
 section "lk-jwt-service"
 JWT_CHANGED=0
 
-if [ -x /usr/local/bin/lk-jwt-service ] && [ "$MODE" != "repair" ]; then
-  log "lk-jwt-service уже установлен"
+CURRENT_JWT_VER=${INSTALLED_LKJWT_VER:-none}
+
+if [ "$LKJWT_VER" = "$CURRENT_JWT_VER" ] && [ -x /usr/local/bin/lk-jwt-service ]; then
+  log "lk-jwt-service $LKJWT_VER уже установлен"
 else
   info "Проверяю/скачиваю lk-jwt-service..."
   curl -L --fail --silent --show-error "$LKJWT_URL" -o /tmp/lk-jwt-service || warn "Не удалось скачать бинарник lk-jwt-service"
@@ -847,7 +869,7 @@ else
     rm -f /tmp/lk-jwt-service
     apt-get install -y -qq golang-go git 2>/dev/null || true
     if ! command -v go >/dev/null 2>&1; then
-      safe_download "https://go.dev/dl/go1.24.3.linux-amd64.tar.gz" "/tmp/go.tar.gz" "Go"
+      download_file "$GO_URL" "/tmp/go.tar.gz" "Go"
       tar -xzf /tmp/go.tar.gz -C /usr/local/
       rm -f /tmp/go.tar.gz
       export PATH=$PATH:/usr/local/go/bin
@@ -1045,6 +1067,9 @@ MACAROON_SECRET=$MACAROON_SECRET
 TURN_SECRET=$TURN_SECRET
 LIVEKIT_KEY=$LIVEKIT_KEY
 LIVEKIT_SECRET=$LIVEKIT_SECRET
+INSTALLED_ELEMENT_VER=$ELEMENT_VER
+INSTALLED_LIVEKIT_VER=$LIVEKIT_VER
+INSTALLED_LKJWT_VER=$LKJWT_VER
 EOF
 chmod 600 "$SECRETS_FILE"
 
