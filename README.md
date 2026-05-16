@@ -1,6 +1,6 @@
 
 
-# Matrix + LiveKit Installer (Alpha v0.8.0)
+# Matrix + LiveKit Installer (Alpha v0.9.0)
 
 Bash-скрипт для автоматического развертывания сервера **Matrix Synapse** с поддержкой звонков через **LiveKit**. Предназначен для быстрой настройки «семейного» мессенджера или корпоративной связи на собственных мощностях.
 
@@ -41,6 +41,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/konvasru-oss/matrix-deploy/m
 
 | Команда | Действие |
 | --- | --- |
+| `matrix-status` | Проверка состояния всех сервисов и SSL |
 | `matrix-backup` | Резервное копирование БД и конфигов |
 | `matrix-reset-password` | Смена пароля любого пользователя |
 | `matrix-admin-reset-password` | Сброс пароля встроенного админа |
@@ -57,7 +58,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/konvasru-oss/matrix-deploy/m
 ## Дорожная карта (ToDo)
 
 * [ ] Оптимизация процесса обновления без переустановки.
-* [ ] Улучшение системы мониторинга состояния сервисов.
+* [ ] Поддержка бэкапов в S3/WebDAV.
 
 ---
 
