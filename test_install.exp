@@ -1,0 +1,41 @@
+#!/usr/bin/expect -f
+
+set timeout 300
+
+# Configuration from ticket
+set matrix_domain "matrix.photo-hm.ru"
+set livekit_domain "lk.photo-hm.ru"
+set le_email "admin@photo-hm.ru"
+
+spawn bash install.sh
+
+expect "Выбор"
+send "2\r"
+
+expect {
+    "Использовать его?" {
+        send "y\r"
+        exp_continue
+    }
+    "Домен Matrix" {
+        send "$matrix_domain\r"
+        exp_continue
+    }
+    "Домен LiveKit" {
+        send "$livekit_domain\r"
+        exp_continue
+    }
+    "Email для SSL" {
+        send "$le_email\r"
+        exp_continue
+    }
+    "Всё верно?" {
+        send "y\r"
+        exp_continue
+    }
+    "Всё равно продолжить?" {
+        send "y\r"
+        exp_continue
+    }
+    eof
+}
