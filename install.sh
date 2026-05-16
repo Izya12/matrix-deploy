@@ -1,14 +1,14 @@
 #!/bin/bash
 # ============================================================
-#  Matrix Synapse + LiveKit  —  v0.8.0
+#  Matrix Synapse + LiveKit  —  v0.9.0
 #  Debian 12+  •  запуск от root
 #  Меню: install / repair / passwd / backup / restore /
-#        migration_backup / migration_restore / admin_passwd
+#        migration_backup / migration_restore / admin_passwd / status
 # ============================================================
 
 set -o pipefail
 
-SCRIPT_VERSION="v0.8.0"
+SCRIPT_VERSION="v0.9.0"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -376,8 +376,9 @@ echo -e "  ${BOLD}5.${NC} Восстановить из бэкапа"
 echo -e "  ${BOLD}6.${NC} Бэкап для переезда на другой сервер"
 echo -e "  ${BOLD}7.${NC} Восстановление с другого сервера"
 echo -e "  ${BOLD}8.${NC} Сброс пароля администратора"
+echo -e "  ${BOLD}9.${NC} Проверить состояние сервисов (status)"
 echo ""
-read -rp "  Выбор [1-8]: " MENU_CHOICE
+read -rp "  Выбор [1-9]: " MENU_CHOICE
 
 case "$MENU_CHOICE" in
   1) MODE="install"           ;;
@@ -388,6 +389,7 @@ case "$MENU_CHOICE" in
   6) MODE="migration_backup"  ;;
   7) MODE="migration_restore" ;;
   8) MODE="admin_passwd"      ;;
+  9) MODE="status"            ;;
   *) die "Неверный выбор"     ;;
 esac
 
@@ -407,6 +409,13 @@ if [ "$MODE" = "admin_passwd" ]; then
   [ -x /usr/local/bin/matrix-admin-reset-password ] \
     || die "Утилита не установлена — сначала установи Matrix (пункт 1)"
   /usr/local/bin/matrix-admin-reset-password
+  exit 0
+fi
+
+if [ "$MODE" = "status" ]; then
+  [ -x /usr/local/bin/matrix-status ] \
+    || die "Утилита не установлена — сначала установи Matrix (пункт 1)"
+  /usr/local/bin/matrix-status
   exit 0
 fi
 
@@ -1456,6 +1465,69 @@ echo "Домен $FEDOMAIN удалён из federation whitelist"
 SCRIPT
 chmod +x /usr/local/bin/matrix-remove-federation
 
+safe_write /usr/local/bin/matrix-status <<'SCRIPT'
+#!/bin/bash
+[ "$EUID" -ne 0 ] && { echo "Запускай от root"; exit 1; }
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+
+echo -e "\n${CYAN}${BOLD}━━━ Состояние Matrix + LiveKit ━━━${NC}\n"
+
+# 1. Сервисы
+echo -e "${BOLD}Сервисы:${NC}"
+services=("matrix-synapse" "postgresql" "nginx" "coturn" "fail2ban" "livekit" "lk-jwt-service")
+for svc in "${services[@]}"; do
+if systemctl is-active --quiet "$svc"; then
+  printf "  %-20s ${GREEN}[RUNNING]${NC}\n" "$svc"
+else
+  printf "  %-20s ${RED}[STOPPED]${NC}\n" "$svc"
+fi
+done
+
+# 2. Порты
+echo -e "\n${BOLD}Порты:${NC}"
+ports=(8008 3478 7880 8080)
+names=("Synapse" "TURN" "LiveKit" "LK-JWT")
+for i in "${!ports[@]}"; do
+if ss -tuln | grep -q ":${ports[$i]} "; then
+  printf "  %-12s (:%-4s) ${GREEN}[LISTEN]${NC}\n" "${names[$i]}" "${ports[$i]}"
+else
+  printf "  %-12s (:%-4s) ${RED}[DOWN]${NC}\n" "${names[$i]}" "${ports[$i]}"
+fi
+done
+
+# 3. SSL
+echo -e "\n${BOLD}SSL Сертификаты:${NC}"
+for domain in $(ls /etc/letsencrypt/live/ 2>/dev/null); do
+[ "$domain" = "README" ] && continue
+cert="/etc/letsencrypt/live/$domain/fullchain.pem"
+if [ -f "$cert" ]; then
+  expiry=$(openssl x509 -enddate -noout -in "$cert" | cut -d= -f2)
+  expiry_s=$(date -d "$expiry" +%s)
+  now_s=$(date +%s)
+  diff=$(( (expiry_s - now_s) / 86400 ))
+
+  if [ $diff -gt 15 ]; then
+    color=$GREEN
+  elif [ $diff -gt 0 ]; then
+    color=$YELLOW
+  else
+    color=$RED
+  fi
+  printf "  %-20s ${color}%s дней${NC} (до %s)\n" "$domain" "$diff" "$expiry"
+fi
+done
+
+# 4. Диск
+echo -e "\n${BOLD}Дисковое пространство:${NC}"
+df -h / | awk 'NR==2 { printf "  Корень: %s используется из %s (%s свободно)\n", $3, $2, $4 }'
+[ -d /var/lib/matrix-synapse/media ] && du -sh /var/lib/matrix-synapse/media | awk '{ printf "  Медиа:  %s\n", $1 }'
+[ -d /opt/matrix-backups ] && du -sh /opt/matrix-backups | awk '{ printf "  Бэкапы: %s\n", $1 }'
+
+echo ""
+SCRIPT
+chmod +x /usr/local/bin/matrix-status
+
 log "Утилиты установлены"
 
 # ══════════════════════════════════════════════════════════
@@ -1528,6 +1600,7 @@ echo "  ╔═══════════════════════
 echo "  ║            Matrix + LiveKit  •  ${SCRIPT_VERSION}                      ║"
 echo "  ╠══════════════════════════════════════════════════════════════╣"
 printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN/element/"
+printf  "  ║  Админка: https://%-42s║\n" "$DOMAIN/admin/"
 printf  "  ║  LiveKit: wss://%-44s║\n" "$LIVEKIT_DOMAIN"
 echo    "  ╠══════════════════════════════════════════════════════════════╣"
 if [ "$MODE" = "install" ]; then
@@ -1548,21 +1621,22 @@ echo -e "  ${YELLOW}⚠  Media wipe: 1 числа в 04:00 (remote медиа >3
 echo ""
 
 echo -e "  ${CYAN}Команды:${NC}"
+echo -e "    matrix-status                 — проверить состояние сервисов"
 echo -e "    matrix-reset-password         — сменить пароль пользователя"
-echo -e "    matrix-admin-reset-password   — сбросить пароль администратора"
+echo -e "    matrix-admin-reset-password   — сбросить пароль адм��нистратора"
 echo -e "    matrix-backup [yes]           — обычный бэкап (yes = с медиа)"
 echo -e "    matrix-migration-backup       — бэкап для переезда"
 echo -e "    matrix-add-federation X       — разрешить федерацию с X"
 echo -e "    matrix-remove-federation X    — запретить федерацию с X"
 echo ""
 
-echo -e "  ${CYAN}Управление пользователями (онлайн-админка):${NC}"
-echo -e "  https://awesome-technologies.github.io/synapse-admin/"
+echo -e "  ${CYAN}Управление пользователями (Админка):${NC}"
+echo -e "  https://$DOMAIN/admin/"
 echo -e "  Homeserver URL: https://$DOMAIN"
 echo ""
 
 if command -v qrencode >/dev/null 2>&1; then
-  qrencode -t UTF8 -o - "https://awesome-technologies.github.io/synapse-admin/" \
+  qrencode -t UTF8 -o - "https://$DOMAIN/admin/" \
     2>/dev/null | sed 's/^/  /'
 fi
 echo ""
