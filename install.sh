@@ -309,9 +309,12 @@ server { listen 80; server_name $DOMAIN $LIVEKIT_DOMAIN; root /var/www/html; }
 NGINX
     ln -sf /etc/nginx/sites-available/matrix-tmp /etc/nginx/sites-enabled/matrix-tmp
     nginx -t && systemctl restart nginx
-    certbot certonly --nginx -d "$DOMAIN" -d "$LIVEKIT_DOMAIN" \
+    certbot certonly --nginx -d "$DOMAIN" \
       --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" \
-      || die "Certbot не смог получить сертификат"
+      || die "Certbot не смог получить сертификат для $DOMAIN"
+    certbot certonly --nginx -d "$LIVEKIT_DOMAIN" \
+      --non-interactive --agree-tos --email "${LE_EMAIL:-admin@$DOMAIN}" \
+      || die "Certbot не смог получить сертификат для $LIVEKIT_DOMAIN"
     rm -f /etc/nginx/sites-enabled/matrix-tmp /etc/nginx/sites-available/matrix-tmp
   fi
 
@@ -786,10 +789,6 @@ else
   [ $HAS_MAIN_CERT -eq 0 ] && check_dns "$DOMAIN"
   [ $HAS_LK_CERT -eq 0 ]   && check_dns "$LIVEKIT_DOMAIN"
 
-  DOMAINS_TO_REQUEST=""
-  [ $HAS_MAIN_CERT -eq 0 ] && DOMAINS_TO_REQUEST="$DOMAINS_TO_REQUEST -d $DOMAIN"
-  [ $HAS_LK_CERT -eq 0 ]   && DOMAINS_TO_REQUEST="$DOMAINS_TO_REQUEST -d $LIVEKIT_DOMAIN"
-
   cat > /etc/nginx/sites-available/matrix-tmp <<NGINX
 server {
     listen 80;
@@ -800,9 +799,16 @@ NGINX
   ln -sf /etc/nginx/sites-available/matrix-tmp /etc/nginx/sites-enabled/matrix-tmp
   nginx -t && systemctl restart nginx
 
-  certbot certonly --nginx $DOMAINS_TO_REQUEST \
-    --non-interactive --agree-tos --email "$LE_EMAIL" \
-    || die "Certbot не смог получить се����тификат. Домены указыв��ют на этот сервер?"
+  if [ $HAS_MAIN_CERT -eq 0 ]; then
+    certbot certonly --nginx -d "$DOMAIN" \
+      --non-interactive --agree-tos --email "$LE_EMAIL" \
+      || die "Certbot не смог получить сертификат для $DOMAIN"
+  fi
+  if [ $HAS_LK_CERT -eq 0 ]; then
+    certbot certonly --nginx -d "$LIVEKIT_DOMAIN" \
+      --non-interactive --agree-tos --email "$LE_EMAIL" \
+      || die "Certbot не смог получить сертификат для $LIVEKIT_DOMAIN"
+  fi
 
   rm -f /etc/nginx/sites-enabled/matrix-tmp /etc/nginx/sites-available/matrix-tmp
   log "SSL готов"
@@ -916,7 +922,6 @@ rtc:
   tcp_port: 7881
   port_range_start: 57001
   port_range_end: 65535
-  bind_addresses: ["$BIND_ADDR"]
   $( [ -n "$PUBLIC_IP" ] && echo "node_ip: $PUBLIC_IP" || echo "use_external_ip: true" )
 keys:
   $LIVEKIT_KEY: $LIVEKIT_SECRET
@@ -1140,8 +1145,8 @@ server {
     http2 on;
     server_name $LIVEKIT_DOMAIN;
 
-    ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/$LIVEKIT_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$LIVEKIT_DOMAIN/privkey.pem;
     include /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
 
@@ -1635,12 +1640,12 @@ fi
 
 # ══════════════════════════════════════════════════════════
 #  ИТОГ
-# ══════════════════════════════════════════════════════════
+# ════════════════════�����════��════════════════════════════════
 echo ""
 echo -e "${GREEN}${BOLD}"
 echo "  ╔══════════════════════════════════════════════════════════════╗"
 echo "  ║            Matrix + LiveKit  •  ${SCRIPT_VERSION}                      ║"
-echo "  ╠══════��═══════════════════════════════════════════════�����══════╣"
+echo "  ╠═══��══��═══════════════════════════════════════════════�����══════╣"
 printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN/element/"
 printf  "  ║  Админка: https://%-42s║\n" "$DOMAIN/admin/"
 printf  "  ║  LiveKit: wss://%-44s║\n" "$LIVEKIT_DOMAIN"
@@ -1676,7 +1681,9 @@ echo ""
 
 echo -e "  ${CYAN}Управление пользователями (Админка):${NC}"
 echo -e "  https://$DOMAIN/admin/"
-echo -e "  Homeserver URL: https://$DOMAIN"
+echo -e "  Для входа используйте:"
+echo -e "  - Homeserver URL: https://$DOMAIN"
+echo -e "  - Ваши учетные данные администратора"
 echo ""
 
 if command -v qrencode >/dev/null 2>&1; then
