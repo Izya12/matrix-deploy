@@ -378,6 +378,316 @@ NGINX
 }
 
 # ══════════════════════════════════════════════════════════
+#  DOCKER INSTALLATION
+# ══════════════════════════════════════════════════════════
+install_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    section "Установка Docker"
+    curl -fsSL https://get.docker.com -o get-docker.sh
+    sh get-docker.sh
+    rm get-docker.sh
+    systemctl enable --now docker
+    log "Docker установлен"
+  fi
+  if ! docker compose version >/dev/null 2>&1; then
+    section "Установка Docker Compose"
+    apt-get update && apt-get install -y docker-compose-plugin
+    log "Docker Compose установлен"
+  fi
+}
+
+generate_docker_compose() {
+  local target_dir="$1"
+  cat <<EOF > "$target_dir/docker-compose.yml"
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: "$PG_PASS"
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+
+  synapse:
+    image: matrixdotorg/synapse:latest
+    restart: always
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+    volumes:
+      - ./data/synapse:/data
+    depends_on:
+      - db
+    ports:
+      - "8008:8008"
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    network_mode: host
+    volumes:
+      - ./data/nginx/conf.d:/etc/nginx/conf.d
+      - ./data/nginx/www:/var/www/html
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - synapse
+      - element
+      - synapse-admin
+
+  element:
+    image: vectorim/element-web:latest
+    restart: always
+    ports:
+      - "8081:80"
+    volumes:
+      - ./data/element/config.json:/app/config.json
+
+  synapse-admin:
+    image: awesometechnologies/synapse-admin:latest
+    restart: always
+    ports:
+      - "8082:80"
+
+  coturn:
+    image: coturn/coturn:latest
+    restart: always
+    network_mode: host
+    volumes:
+      - ./data/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+  livekit:
+    image: livekit/livekit:latest
+    restart: always
+    network_mode: host
+    command: --config /etc/livekit/livekit.yaml
+    volumes:
+      - ./data/livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
+
+  lk-jwt:
+    image: ghcr.io/element-hq/lk-jwt-service:latest
+    restart: always
+    environment:
+      LIVEKIT_URL: wss://$LIVEKIT_DOMAIN
+      LIVEKIT_KEY: "$LIVEKIT_KEY"
+      LIVEKIT_SECRET: "$LIVEKIT_SECRET"
+      LIVEKIT_FULL_ACCESS_HOMESERVERS: "$DOMAIN"
+    ports:
+      - "8080:8080"
+EOF
+}
+
+do_docker_install() {
+  section "Установка в Docker Compose"
+
+  read -rp "  Домен Matrix (matrix.example.com):  " DOMAIN
+  read -rp "  Домен LiveKit (livekit.example.com): " LIVEKIT_DOMAIN
+  read -rp "  Email для SSL: " LE_EMAIL
+
+  [ -z "$DOMAIN" ] || [ -z "$LIVEKIT_DOMAIN" ] || [ -z "$LE_EMAIL" ] && die "Все поля обязательны"
+
+  # Секреты
+  [ -z "$PG_PASS" ]             && PG_PASS=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c32)
+  [ -z "$REGISTRATION_SECRET" ] && REGISTRATION_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48)
+  [ -z "$MACAROON_SECRET" ]     && MACAROON_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48)
+  [ -z "$TURN_SECRET" ]         && TURN_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c32)
+  [ -z "$LIVEKIT_KEY" ]         && LIVEKIT_KEY="matrix"
+  [ -z "$LIVEKIT_SECRET" ]      && LIVEKIT_SECRET=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c48)
+
+  install_docker
+
+  DOCKER_DIR="/opt/matrix-docker"
+  mkdir -p "$DOCKER_DIR/data/"{synapse,postgres,nginx/conf.d,nginx/www,element,coturn,livekit}
+
+  # Generate docker-compose
+  generate_docker_compose "$DOCKER_DIR"
+
+  # В Docker-версии мы также используем certbot на хосте для простоты
+  section "SSL"
+  apt-get install -y certbot python3-certbot-nginx nginx
+  # Получаем сертификаты если их нет
+  if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos --email "$LE_EMAIL"
+  fi
+  if [ ! -f "/etc/letsencrypt/live/$LIVEKIT_DOMAIN/fullchain.pem" ]; then
+    certbot certonly --standalone -d "$LIVEKIT_DOMAIN" --non-interactive --agree-tos --email "$LE_EMAIL"
+  fi
+
+  # Synapse Config
+  cat <<EOF > "$DOCKER_DIR/data/synapse/homeserver.yaml"
+server_name: "$DOMAIN"
+public_baseurl: "https://$DOMAIN/"
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: "$PG_PASS"
+    database: synapse
+    host: db
+    cp_min: 5
+    cp_max: 10
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    resources:
+      - names: [client, federation]
+        compress: false
+turn_uris:
+  - "turn:$DOMAIN:3478?transport=udp"
+  - "turn:$DOMAIN:3478?transport=tcp"
+turn_shared_secret: "$TURN_SECRET"
+EOF
+
+  # Element Config
+  cat <<EOF > "$DOCKER_DIR/data/element/config.json"
+{
+    "default_server_config": {
+        "m.homeserver": {
+            "base_url": "https://$DOMAIN",
+            "server_name": "$DOMAIN"
+        }
+    }
+}
+EOF
+
+  # LiveKit Config
+  cat <<EOF > "$DOCKER_DIR/data/livekit/livekit.yaml"
+port: 7880
+keys:
+  $LIVEKIT_KEY: "$LIVEKIT_SECRET"
+EOF
+
+  # Coturn Config
+  cat <<EOF > "$DOCKER_DIR/data/coturn/turnserver.conf"
+listening-port=3478
+fingerprint
+use-auth-secret
+static-auth-secret=$TURN_SECRET
+realm=$DOMAIN
+EOF
+
+  # Nginx Config
+  cat <<NGINX > "$DOCKER_DIR/data/nginx/conf.d/matrix.conf"
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name $DOMAIN;
+    ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+    location /.well-known/matrix/client {
+        default_type application/json;
+        add_header Access-Control-Allow-Origin *;
+        return 200 '{"m.homeserver":{"base_url":"https://$DOMAIN"},"org.matrix.msc4143.rtc_foci":[{"type":"livekit","livekit_service_url":"https://$DOMAIN/livekit/jwt"}]}';
+    }
+    location /.well-known/matrix/server {
+        default_type application/json;
+        return 200 '{"m.server":"$DOMAIN:443"}';
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8008;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    location /element/ {
+        proxy_pass http://127.0.0.1:8081/;
+    }
+
+    location /admin/ {
+        proxy_pass http://127.0.0.1:8082/;
+    }
+
+    location /livekit/jwt {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+    }
+}
+
+server {
+    listen 80;
+    server_name $LIVEKIT_DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name $LIVEKIT_DOMAIN;
+    ssl_certificate     /etc/letsencrypt/live/$LIVEKIT_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$LIVEKIT_DOMAIN/privkey.pem;
+    location / {
+        proxy_pass http://127.0.0.1:7880;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+    }
+}
+NGINX
+
+  cd "$DOCKER_DIR"
+  docker compose up -d
+  log "Docker Compose stack запущен"
+}
+
+do_migrate_to_docker() {
+  section "Миграция в Docker"
+  
+  if [ ! -f /etc/matrix-synapse/homeserver.yaml ]; then
+    die "Локальная установка не найдена"
+  fi
+  
+  load_secrets
+  DOMAIN=$(get_installed_domain)
+  
+  install_docker
+  
+  DOCKER_DIR="/opt/matrix-docker"
+  mkdir -p "$DOCKER_DIR/data/"{synapse,postgres,nginx/conf.d,nginx/www,element,coturn,livekit}
+
+  log "Остановка локальных сервисов..."
+  systemctl stop matrix-synapse nginx coturn livekit lk-jwt-service postgresql
+  
+  log "Создание бэкапа данных..."
+  su -c "pg_dump -Fc synapse" postgres > /tmp/synapse.dump
+  
+  log "Перенос данных..."
+  cp -r /var/lib/matrix-synapse/media "$DOCKER_DIR/data/synapse/"
+  cp /etc/matrix-synapse/homeserver.signing.key "$DOCKER_DIR/data/synapse/"
+  
+  # Update homeserver.yaml for Docker
+  cp /etc/matrix-synapse/homeserver.yaml "$DOCKER_DIR/data/synapse/homeserver.yaml"
+  sed -i "s/host: 127.0.0.1/host: db/" "$DOCKER_DIR/data/synapse/homeserver.yaml"
+  
+  # Generate docker-compose
+  generate_docker_compose "$DOCKER_DIR"
+  
+  log "Запуск Docker..."
+  cd "$DOCKER_DIR"
+  docker compose up -d db
+  
+  log "Ожидание БД..."
+  sleep 10
+  
+  log "Восстановление БД..."
+  docker exec -i $(docker compose ps -q db) psql -U synapse synapse < /tmp/synapse.dump
+  
+  docker compose up -d
+  log "Миграция завершена"
+}
+
+# ══════════════════════════════════════════════════════════
 #  ГЛАВНОЕ МЕНЮ
 # ══════════════════════════════════════════════════════════
 clear
@@ -391,9 +701,11 @@ echo -e "  ${BOLD}5.${NC} Восстановить из бэкапа"
 echo -e "  ${BOLD}6.${NC} Бэкап для переезда на другой сервер"
 echo -e "  ${BOLD}7.${NC} Восстановление с другого сервера"
 echo -e "  ${BOLD}8.${NC} Сброс пароля администратора"
-echo -e "  ${BOLD}9.${NC} Проверить состояние сервисов (status)"
+echo -e "  ${BOLD}9.${NC} Установка в Docker Compose"
+echo -e "  ${BOLD}10.${NC} Миграция с локальной установки в Docker"
+echo -e "  ${BOLD}11.${NC} Проверить состояние сервисов (status)"
 echo ""
-read -rp "  Выбор [1-9]: " MENU_CHOICE
+read -rp "  Выбор [1-11]: " MENU_CHOICE
 
 case "$MENU_CHOICE" in
   1) MODE="install"           ;;
@@ -404,7 +716,9 @@ case "$MENU_CHOICE" in
   6) MODE="migration_backup"  ;;
   7) MODE="migration_restore" ;;
   8) MODE="admin_passwd"      ;;
-  9) MODE="status"            ;;
+  9) MODE="docker_install"    ;;
+  10) MODE="migrate_to_docker" ;;
+  11) MODE="status"            ;;
   *) die "Неверный выбор"     ;;
 esac
 
@@ -459,6 +773,16 @@ fi
 
 if [ "$MODE" = "migration_restore" ]; then
   do_migration_restore
+  exit 0
+fi
+
+if [ "$MODE" = "docker_install" ]; then
+  do_docker_install
+  exit 0
+fi
+
+if [ "$MODE" = "migrate_to_docker" ]; then
+  do_migrate_to_docker
   exit 0
 fi
 
@@ -575,7 +899,7 @@ ufw allow 7881/tcp 2>/dev/null || true
 ufw allow 49152:65535/udp 2>/dev/null || true
 log "Порты открыты"
 
-# ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════��═══════════════
 #  ЗАВИСИМОСТИ
 # ══════════════════════════════════════════════════════════
 section "Зависимости"
@@ -1642,7 +1966,7 @@ fi
 
 # ══════════════════════════════════════════════════════════
 #  ИТОГ
-# ════════════════════�����════��════════════════════════════════
+# ��═══════════════════�����════��════════════════════════════════
 echo ""
 echo -e "${GREEN}${BOLD}"
 echo "  ╔═══════��═���════════════════════════════════════════════════════╗"
