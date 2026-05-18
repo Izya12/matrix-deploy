@@ -15,7 +15,7 @@ if [ "$SURE" != "yes" ]; then echo "Отмена."; exit 0; fi
 # Synapse
 systemctl stop matrix-synapse 2>/dev/null || true
 systemctl disable matrix-synapse 2>/dev/null || true
-apt-get remove --purge -y matrix-synapse-py3 2>/dev/null || true
+apt-get remove --purge -y matrix-synapse 2>/dev/null || true
 rm -rf /etc/matrix-synapse /var/lib/matrix-synapse /var/log/matrix-synapse
 rm -f /etc/apt/sources.list.d/matrix-org.list
 rm -f /usr/share/keyrings/matrix-org-archive-keyring.gpg

@@ -257,7 +257,7 @@ https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
       > /etc/apt/sources.list.d/matrix-org.list
     apt-get update -qq
   fi
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq matrix-synapse-py3
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq matrix-synapse
   systemctl stop matrix-synapse 2>/dev/null || true
 
   section "PostgreSQL"
@@ -619,7 +619,7 @@ https://packages.matrix.org/debian/ $(lsb_release -cs) main" \
     > /etc/apt/sources.list.d/matrix-org.list
   apt-get update -qq
 fi
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq matrix-synapse-py3
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq matrix-synapse
 
 rm -f /etc/matrix-synapse/conf.d/server_name.yaml
 
@@ -663,6 +663,7 @@ max_upload_size: 50M
 
 # Автоудаление удалённых медиа (картинок/видео с других серверов) через 30 дней
 media_retention:
+  local_media_lifetime: 90d
   remote_media_lifetime: 30d
 
 enable_registration: true
@@ -917,12 +918,13 @@ fi
 mkdir -p /etc/livekit
 safe_write /etc/livekit/livekit.yaml <<EOF || LK_CHANGED=1
 port: 7880
-bind_addresses: ["$BIND_ADDR"]
+bind_addresses:
+  - "$BIND_ADDR"
 rtc:
   tcp_port: 7881
   port_range_start: 57001
   port_range_end: 65535
-  $( [ -n "$PUBLIC_IP" ] && echo "node_ip: $PUBLIC_IP" || echo "use_external_ip: true" )
+  $( [ -n "$PUBLIC_IP" ] && echo "node_ip: \"$PUBLIC_IP\"" || echo "use_external_ip: true" )
 keys:
   $LIVEKIT_KEY: $LIVEKIT_SECRET
 logging:
@@ -1643,7 +1645,7 @@ fi
 # ════════════════════�����════��════════════════════════════════
 echo ""
 echo -e "${GREEN}${BOLD}"
-echo "  ╔══════════════════════════════════════════════════════════════╗"
+echo "  ╔═══════��═���════════════════════════════════════════════════════╗"
 echo "  ║            Matrix + LiveKit  •  ${SCRIPT_VERSION}                      ║"
 echo "  ╠═══��══��═══════════════════════════════════════════════�����══════╣"
 printf  "  ║  Чат:     https://%-42s║\n" "$DOMAIN/element/"
@@ -1683,7 +1685,8 @@ echo -e "  ${CYAN}Управление пользователями (Админ�
 echo -e "  https://$DOMAIN/admin/"
 echo -e "  Для входа используйте:"
 echo -e "  - Homeserver URL: https://$DOMAIN"
-echo -e "  - Ваши учетные данные администратора"
+echo -e "  - Username: admin (или ваше имя)"
+echo -e "  - Password: ваш пароль"
 echo ""
 
 if command -v qrencode >/dev/null 2>&1; then
